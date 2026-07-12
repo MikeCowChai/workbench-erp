@@ -119,24 +119,10 @@ const DB = (() => {
       });
     },
 
-    /* Atomic: record a purchase and increment the product's stock. */
+    /* Purchases are a pure expense log — they record money spent, not stock.
+       No cross-store transaction needed since nothing else is touched. */
     async receivePurchase(purchase) {
-      const db = await open();
-      return new Promise((resolve, reject) => {
-        const t = db.transaction(['purchases', 'products'], 'readwrite');
-        const products = t.objectStore('products');
-        const getReq = products.get(purchase.productId);
-        getReq.onsuccess = () => {
-          const p = getReq.result;
-          if (!p) { t.abort(); reject(new Error('Product not found')); return; }
-          if (p.trackStock === false) { t.abort(); reject(new Error('This item has no stock to receive')); return; }
-          p.stock += purchase.qty;
-          products.put(p);
-          t.objectStore('purchases').add(purchase);
-        };
-        t.oncomplete = () => resolve();
-        t.onerror = () => reject(t.error);
-      });
+      return api.add('purchases', purchase);
     }
   };
 
