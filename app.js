@@ -93,6 +93,8 @@ async function renderDashboard() {
   // Payment is taken before shipping, so every order placed counts as revenue.
   const monthOrders = orders.filter(o => o.createdAt >= monthStart);
   const revenue = monthOrders.reduce((s, o) => s + o.total, 0);
+  const monthPurchases = purchases.filter(pu => pu.receivedAt >= monthStart);
+  const costs = monthPurchases.reduce((s, pu) => s + (pu.amount || 0), 0);
 
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
   const readyToShip = orders.filter(o => o.status === STATUSES[1]).length;
@@ -106,7 +108,7 @@ async function renderDashboard() {
     if (o.statusChangedAt && o.status !== STATUSES[0])
       events.push({ ts: o.statusChangedAt, type: 'status', text: `Order #${o.id} moved to “${o.status}”` });
   });
-  purchases.forEach(p => events.push({ ts: p.receivedAt, type: 'stock', text: `Received ${p.qty} × ${esc(p.productName)}${p.supplier ? ' from ' + esc(p.supplier) : ''}` }));
+  purchases.forEach(p => events.push({ ts: p.receivedAt, type: 'stock', text: `Spent ${fmtMoney(p.amount)} on ${esc(p.description)}${p.supplier ? ' — ' + esc(p.supplier) : ''}` }));
   events.sort((a, b) => b.ts - a.ts);
 
   const empty = !orders.length && !products.length;
@@ -129,6 +131,11 @@ async function renderDashboard() {
       <div class="stat-card">
         <div class="label">Ready for shipping</div>
         <div class="value">${readyToShip}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Costs · ${now.toLocaleDateString(undefined, { month: 'long' })}</div>
+        <div class="value">${fmtMoney(costs)}</div>
+        <div class="hint">${monthPurchases.length} purchase${monthPurchases.length === 1 ? '' : 's'} logged</div>
       </div>
       ${(lowStock + outOfStock) ? `
       <div class="stat-card warn" style="grid-column:1/-1" id="lowStockCard" role="button" tabindex="0">
@@ -179,11 +186,8 @@ function stockBadge(p) {
   return '';
 }
 
-let productsCache = []; // used by the purchase form to look up unit type on selection
-
 async function renderProducts() {
   const products = await DB.getAll('products');
-  productsCache = products;
   const q = state.search.product.toLowerCase();
   let list = products.filter(p =>
     p.name.toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q));
@@ -209,17 +213,9 @@ async function renderProducts() {
 
   document.querySelectorAll('#productList [data-pid]').forEach(el =>
     el.addEventListener('click', () => openProductForm(Number(el.dataset.pid))));
-
-  // Also refresh the purchase form's product dropdown — service items (Delivery) have no stock to receive.
-  $('#poProduct').innerHTML = products
-    .filter(p => p.trackStock !== false)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map(p => `<option value="${p.id}">${esc(p.name)} (${fmtStock(p)} in stock)</option>`).join('')
-    || '<option value="">— add a stock item first —</option>';
-  drawPurchaseFields();
 }
 
-/* ----- Inventory: incoming purchases ----- */
+/* ----- Inventory: incoming purchases (a pure expense log — no stock effect) ----- */
 async function renderPurchases() {
   const purchases = await DB.getAll('purchases');
   purchases.sort((a, b) => b.receivedAt - a.receivedAt);
@@ -227,73 +223,27 @@ async function renderPurchases() {
     <div class="card">
       <div class="row">
         <div class="row-main">
-          <div class="name">${esc(p.productName)}</div>
+          <div class="name">${esc(p.description)}</div>
           <div class="sub">${p.supplier ? esc(p.supplier) + ' · ' : ''}${fmtDate(p.receivedAt)}</div>
-          ${p.priceInfo ? `<div class="sub">${fmtMoney(p.priceInfo.pricePerUnit)} / ${p.priceInfo.unit}</div>` : ''}
         </div>
-        <div class="row-end"><div class="big">+${esc(p.displayQty || p.qty)}</div><div class="sub">received</div></div>
+        <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
       </div>
-    </div>`).join('') || '<div class="empty"><div class="title">No purchases yet</div><div>Stock you receive will appear here.</div></div>';
+    </div>`).join('') || '<div class="empty"><div class="title">No purchases yet</div><div>Money spent on stock or materials will appear here.</div></div>';
 }
-
-// The purchase form adapts to the selected product: plain quantity for
-// piece-counted stock, or quantity + g/kg unit + optional cost-per-unit
-// for weight-tracked raw materials (e.g. sand bought in bulk by the kilo).
-function drawPurchaseFields() {
-  const box = $('#poDynamicFields');
-  const pid = Number($('#poProduct').value);
-  const p = productsCache.find(x => x.id === pid);
-  if (!box) return;
-  if (!p) { box.innerHTML = ''; return; }
-
-  if (p.unit === 'weight') {
-    box.innerHTML = `
-      <div class="field-row">
-        <label class="field"><span>Quantity</span><input type="number" id="poQty" min="0.001" step="0.001" inputmode="decimal" value="1"></label>
-        <label class="field"><span>Unit</span><select id="poUnit"><option value="kg" selected>kg</option><option value="g">g</option></select></label>
-      </div>
-      <div class="field-row">
-        <label class="field"><span>Price per unit (฿, optional)</span><input type="number" id="poPrice" min="0" step="0.01" inputmode="decimal" placeholder="e.g. 0.15"></label>
-        <label class="field"><span>Supplier (optional)</span><input type="text" id="poSupplier" placeholder="e.g. Northline Supply"></label>
-      </div>`;
-  } else {
-    box.innerHTML = `
-      <div class="field-row">
-        <label class="field"><span>Quantity</span><input type="number" id="poQty" min="1" value="1" inputmode="numeric"></label>
-        <label class="field"><span>Supplier (optional)</span><input type="text" id="poSupplier" placeholder="e.g. Northline Supply"></label>
-      </div>`;
-  }
-}
-$('#poProduct').addEventListener('change', drawPurchaseFields);
 
 $('#poReceive').addEventListener('click', async () => {
-  const productId = Number($('#poProduct').value);
-  if (!productId) return snack('Add a product before receiving stock');
-  const product = productsCache.find(p => p.id === productId) || await DB.get('products', productId);
-  const supplierEl = $('#poSupplier');
-  const supplier = supplierEl ? supplierEl.value.trim() : '';
+  const description = $('#poDescription').value.trim();
+  const amount = Number($('#poAmount').value);
+  if (!description) return snack('Enter what you bought');
+  if (!(amount > 0)) return snack('Enter an amount greater than 0');
 
-  let qty, displayQty, priceInfo = null;
-  if (product.unit === 'weight') {
-    const raw = Number($('#poQty').value);
-    const unit = $('#poUnit').value;
-    if (!raw || raw <= 0) return snack('Enter a quantity greater than 0');
-    qty = unit === 'kg' ? raw * 1000 : raw; // stock is always stored in grams
-    displayQty = `${raw} ${unit}`;
-    const pricePerUnit = Number($('#poPrice').value);
-    if (pricePerUnit > 0) priceInfo = { pricePerUnit, unit };
-  } else {
-    const raw = Number($('#poQty').value);
-    if (!raw || raw < 1) return snack('Enter a quantity of at least 1');
-    qty = raw;
-    displayQty = `${raw} pcs`;
-  }
-
-  await DB.receivePurchase({
-    productId, productName: product.name, qty, displayQty, priceInfo,
-    supplier, receivedAt: Date.now()
+  await DB.add('purchases', {
+    description, amount,
+    supplier: $('#poSupplier').value.trim(),
+    receivedAt: Date.now()
   });
-  snack(`Added ${displayQty} × ${product.name} to stock`);
+  $('#poDescription').value = ''; $('#poAmount').value = ''; $('#poSupplier').value = '';
+  snack(`Logged ${fmtMoney(amount)} — ${description}`);
   render();
 });
 
@@ -720,7 +670,7 @@ async function seedSampleData() {
     items: [{ productId: pids[3], name: 'Coat rack, steel', qty: 1, unitPrice: 55 }],
     total: 55, status: 'In production', createdAt: Date.now() - 3600000, statusChangedAt: null
   });
-  await DB.add('purchases', { productId: pids[0], productName: 'Oak shelf 80 cm', qty: 10, supplier: 'Northline Timber', receivedAt: Date.now() - day * 3 });
+  await DB.add('purchases', { description: 'Oak boards, 10 units', amount: 340, supplier: 'Northline Timber', receivedAt: Date.now() - day * 3 });
 
   snack('Sample data loaded');
   render();
