@@ -22,6 +22,17 @@ const timeAgo = ts => {
   return d === 1 ? 'yesterday' : d + ' days ago';
 };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtGrams = g => g >= 1000
+  ? (g / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 }) + ' kg'
+  : g + ' g';
+// How an order line reads: "2 × Oak shelf" for pieces, "1.104 kg Sea salt" for weight.
+const itemLabel = (i, qty = i.qty) => i.unitType === 'weight'
+  ? `${fmtGrams(qty)} ${esc(i.name)}`
+  : `${qty} × ${esc(i.name)}`;
+// Line price: weight items are priced per kg on actual grams, always rounded DOWN.
+const lineTotal = l => l.unitType === 'weight' || l.weightBased
+  ? Math.floor((l.qty || 0) / 1000 * (l.unitPrice || 0))
+  : (l.qty || 0) * (l.unitPrice || 0);
 const $ = sel => document.querySelector(sel);
 
 const state = {
@@ -182,8 +193,11 @@ async function renderDashboard() {
 
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
   const readyToShip = orders.filter(o => o.status === STATUSES[1]).length;
-  // Current stock value at selling price; services (no stock) contribute 0.
-  const stockValue = products.reduce((s, p) => s + (p.trackStock !== false ? p.stock * (p.price || 0) : 0), 0);
+  // Current stock value at selling price; weight stock is in grams, priced per kg.
+  const stockValue = products.reduce((s, p) => {
+    if (p.trackStock === false) return s;
+    return s + (p.unit === 'weight' ? Math.floor(p.stock / 1000 * (p.price || 0)) : p.stock * (p.price || 0));
+  }, 0);
   const lowStock = products.filter(p => p.trackStock !== false && p.stock > 0 && p.stock <= p.lowStock).length;
   const outOfStock = products.filter(p => p.trackStock !== false && p.stock === 0).length;
 
@@ -274,11 +288,7 @@ async function renderDashboard() {
 /* ----- Inventory: products ----- */
 // Weight-type products store stock in grams internally; show it humanized.
 function fmtStock(p) {
-  if (p.unit === 'weight') {
-    return p.stock >= 1000
-      ? (p.stock / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' kg'
-      : p.stock + ' g';
-  }
+  if (p.unit === 'weight') return fmtGrams(p.stock);
   return String(p.stock);
 }
 
@@ -303,7 +313,7 @@ async function renderProducts() {
       <div class="row">
         <div class="row-main">
           <div class="name">${esc(p.name)}</div>
-          <div class="sub">${esc(p.sku || 'No SKU')} · ${fmtMoney(p.price)} / ${p.unit === 'weight' ? 'g' : 'unit'}</div>
+          <div class="sub">${esc(p.sku || 'No SKU')} · ${fmtMoney(p.price)} / ${p.unit === 'weight' ? 'kg' : 'unit'}</div>
           ${stockBadge(p)}
         </div>
         <div class="row-end">
@@ -397,7 +407,7 @@ async function openProductForm(id) {
       <label class="field"><span>Name</span><input id="pfName" value="${esc(p.name)}" placeholder="e.g. Oak shelf 80 cm"></label>
       <div class="field-row">
         <label class="field"><span>SKU (optional)</span><input id="pfSku" value="${esc(p.sku || '')}" placeholder="OAK-80"></label>
-        <label class="field"><span>Unit price (฿)</span><input id="pfPrice" type="number" min="0" step="1" inputmode="numeric" value="${p.price}"></label>
+        <label class="field"><span id="pfPriceLabel">${unitType === 'weight' ? 'Price per kg (฿)' : 'Unit price (฿)'}</span><input id="pfPrice" type="number" min="0" step="1" inputmode="numeric" value="${p.price}"></label>
       </div>
       <label class="field"><span>Unit type</span>
         <select id="pfUnitType">
@@ -416,6 +426,7 @@ async function openProductForm(id) {
 
   function redraw() {
     $('#pfStockFields').innerHTML = stockFieldsHTML($('#pfUnitType').value, $('#pfTrackStock').checked);
+    $('#pfPriceLabel').textContent = $('#pfUnitType').value === 'weight' ? 'Price per kg (฿)' : 'Unit price (฿)';
     bindWeightUnitToggle();
   }
   function bindWeightUnitToggle() {
@@ -512,8 +523,8 @@ async function renderOrders() {
         <div class="row-main">
           <div class="name">#${o.id} · ${esc(o.customerName)}</div>
           <div class="sub">${esc(o.address)}</div>
-          <div class="sub">${o.items.map(i => `${i.qty} × ${esc(i.name)}`).join(', ')}</div>
-          ${waiting.length ? `<span class="badge badge-low"><span class="dot"></span>Awaiting stock: ${waiting.map(i => `${i.pendingQty} × ${esc(i.name)}`).join(', ')}</span>` : ''}
+          <div class="sub">${o.items.map(i => itemLabel(i)).join(', ')}</div>
+          ${waiting.length ? `<span class="badge badge-low"><span class="dot"></span>Awaiting stock: ${waiting.map(i => itemLabel(i, i.pendingQty)).join(', ')}</span>` : ''}
         </div>
         <div class="row-end">
           <div class="big">${fmtMoney(o.total)}</div>
@@ -549,10 +560,17 @@ async function openOrderForm() {
   if (!products.length) return snack('Add products in Inventory before creating orders');
   products.sort((a, b) => a.name.localeCompare(b.name));
 
-  let lines = [{ productId: products[0].id, qty: 1, unitPrice: products[0].price }];
+  const isWeight = p => p.unit === 'weight';
+  const newLine = (p = products[0]) => ({
+    productId: p.id,
+    qty: isWeight(p) ? 1000 : 1,          // grams for weight products, pieces otherwise
+    unitPrice: p.price,                   // per kg for weight products, per piece otherwise
+    weightBased: isWeight(p)
+  });
+  let lines = [newLine()];
 
   const productOptions = sel => products.map(p =>
-    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} (${p.stock} left)</option>`).join('');
+    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} (${p.trackStock === false ? 'service' : fmtStock(p) + ' left'})</option>`).join('');
   const customerOptions = customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
 
   openSheet(`
@@ -584,7 +602,14 @@ async function openOrderForm() {
   const linesEl = $('#ofLines');
 
   function drawLines() {
-    linesEl.innerHTML = lines.map((l, i) => `
+    linesEl.innerHTML = lines.map((l, i) => l.weightBased ? `
+      <div class="line-item" style="margin-bottom:2px">
+        <label class="field"><span>Product</span><select data-li="${i}" data-k="productId">${productOptions(l.productId)}</select></label>
+        <label class="field"><span>Weight (g)</span><input data-li="${i}" data-k="qty" type="number" min="1" inputmode="numeric" value="${l.qty}"></label>
+        <label class="field"><span>฿ / kg</span><input data-li="${i}" data-k="unitPrice" type="number" min="0" step="1" inputmode="numeric" value="${l.unitPrice}"></label>
+        <button class="remove" data-rm="${i}" title="Remove item">✕</button>
+      </div>
+      <div class="line-hint" style="margin-bottom:10px">= ${fmtMoney(lineTotal(l))} (${fmtGrams(l.qty || 0)} at ${fmtMoney(l.unitPrice || 0)}/kg, rounded down)</div>` : `
       <div class="line-item" style="margin-bottom:10px">
         <label class="field"><span>Product</span><select data-li="${i}" data-k="productId">${productOptions(l.productId)}</select></label>
         <label class="field"><span>Qty</span><input data-li="${i}" data-k="qty" type="number" min="1" inputmode="numeric" value="${l.qty}"></label>
@@ -595,26 +620,30 @@ async function openOrderForm() {
     linesEl.querySelectorAll('[data-li]').forEach(el => el.addEventListener('input', () => {
       const i = Number(el.dataset.li), k = el.dataset.k;
       lines[i][k] = Number(el.value);
-      if (k === 'productId') {           // refill price from the product card
+      if (k === 'productId') {           // product switched: refill price/qty/type from the product card
         const p = products.find(p => p.id === lines[i].productId);
-        lines[i].unitPrice = p.price;
+        lines[i] = newLine(p);
         drawLines();
+      } else if (lines[i].weightBased) {
+        // live-update the computed line price under the row
+        const hint = el.closest('.line-item').nextElementSibling;
+        if (hint) hint.textContent = `= ${fmtMoney(lineTotal(lines[i]))} (${fmtGrams(lines[i].qty || 0)} at ${fmtMoney(lines[i].unitPrice || 0)}/kg, rounded down)`;
       }
       updateTotal();
     }));
     linesEl.querySelectorAll('[data-rm]').forEach(el => el.addEventListener('click', () => {
       lines.splice(Number(el.dataset.rm), 1);
-      if (!lines.length) lines = [{ productId: products[0].id, qty: 1, unitPrice: products[0].price }];
+      if (!lines.length) lines = [newLine()];
       drawLines(); updateTotal();
     }));
     updateTotal();
   }
   function updateTotal() {
-    const t = lines.reduce((s, l) => s + (l.qty || 0) * (l.unitPrice || 0), 0);
+    const t = lines.reduce((s, l) => s + lineTotal(l), 0);
     $('#ofTotal').textContent = fmtMoney(t);
   }
 
-  $('#ofAddLine').onclick = () => { lines.push({ productId: products[0].id, qty: 1, unitPrice: products[0].price }); drawLines(); };
+  $('#ofAddLine').onclick = () => { lines.push(newLine()); drawLines(); };
   // Prefill order date with today (local time)
   const _t = new Date();
   $('#ofDate').value = `${_t.getFullYear()}-${String(_t.getMonth() + 1).padStart(2, '0')}-${String(_t.getDate()).padStart(2, '0')}`;
@@ -650,7 +679,13 @@ async function openOrderForm() {
       .filter(l => l.qty > 0)
       .map(l => {
         const p = products.find(p => p.id === l.productId);
-        return { productId: p.id, name: p.name, qty: l.qty, unitPrice: l.unitPrice };
+        return {
+          productId: p.id, name: p.name,
+          qty: l.qty,                                   // grams for weight items, pieces otherwise
+          unitPrice: l.unitPrice,                       // per kg for weight items
+          unitType: l.weightBased ? 'weight' : 'pcs',
+          lineTotal: lineTotal(l)
+        };
       });
     if (!items.length) return snack('Add at least one item');
 
@@ -665,7 +700,7 @@ async function openOrderForm() {
 
     const order = {
       customerId, customerName, address, items,
-      total: items.reduce((s, i) => s + i.qty * i.unitPrice, 0),
+      total: items.reduce((s, i) => s + i.lineTotal, 0),
       status: STATUSES[0], createdAt, statusChangedAt: null
     };
 
@@ -675,7 +710,7 @@ async function openOrderForm() {
       closeSheet();
       const waiting = order.items.filter(i => i.pendingQty > 0);
       if (waiting.length) {
-        snack(`Order #${orderId} created — awaiting stock: ${waiting.map(i => `${i.pendingQty} × ${i.name}`).join(', ')}`);
+        snack(`Order #${orderId} created — awaiting stock: ${waiting.map(i => itemLabel(i, i.pendingQty)).join(', ')}`);
       } else {
         snack(`Order #${orderId} created — in production`);
       }
@@ -743,7 +778,7 @@ async function openCustomerDetail(id) {
           <div class="row">
             <div class="row-main">
               <div class="name">#${o.id} · ${fmtDate(o.createdAt)}</div>
-              <div class="sub">${o.items.map(i => `${i.qty} × ${esc(i.name)}`).join(', ')}</div>
+              <div class="sub">${o.items.map(i => itemLabel(i)).join(', ')}</div>
               <div class="sub" style="font-weight:600;color:var(--md-primary)">${o.status}</div>
             </div>
             <div class="row-end"><div class="big">${fmtMoney(o.total)}</div></div>
