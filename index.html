@@ -42,13 +42,22 @@
     </div>
     <div id="inv-purchases" hidden>
       <div class="card form-card">
-        <h2 class="card-title">Receive stock</h2>
+        <h2 class="card-title">Log a purchase</h2>
         <label class="field">
-          <span>Product</span>
-          <select id="poProduct"></select>
+          <span>What did you buy</span>
+          <input type="text" id="poDescription" placeholder="e.g. Sand 10kg">
         </label>
-        <div id="poDynamicFields"></div>
-        <button class="btn-filled" id="poReceive">Add to stock</button>
+        <div class="field-row">
+          <label class="field">
+            <span>Amount spent (฿)</span>
+            <input type="number" id="poAmount" min="0" step="1" inputmode="numeric" placeholder="100">
+          </label>
+          <label class="field">
+            <span>Supplier (optional)</span>
+            <input type="text" id="poSupplier" placeholder="e.g. Northline Supply">
+          </label>
+        </div>
+        <button class="btn-filled" id="poReceive">Log purchase</button>
       </div>
       <h2 class="section-label">Recent purchases</h2>
       <div id="purchaseList" class="card-list"></div>
