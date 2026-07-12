@@ -86,30 +86,44 @@ function closeSheet() {
 }
 $('#scrim').addEventListener('click', closeSheet);
 
-/* Swipe down on the sheet to dismiss it (only when its content is
-   scrolled to the top, so normal scrolling inside keeps working). */
+/* Swipe down to dismiss the sheet. Non-passive touchmove lets us take over
+   from native scrolling; drag only engages when content is at the top. */
 (function enableSheetDrag() {
   const sheet = $('#sheet');
-  let startY = 0, dy = 0, dragging = false;
+  let startY = 0, dy = 0, active = false, engaged = false;
+
   sheet.addEventListener('touchstart', e => {
-    if (sheet.scrollTop > 0) return;
+    active = sheet.scrollTop <= 0;
+    engaged = false;
     startY = e.touches[0].clientY;
-    dy = 0; dragging = true;
-    sheet.style.transition = 'none';
+    dy = 0;
   }, { passive: true });
+
   sheet.addEventListener('touchmove', e => {
-    if (!dragging) return;
+    if (!active) return;
     dy = e.touches[0].clientY - startY;
-    if (dy > 0) sheet.style.transform = `translateY(${dy}px)`;
-    else { dragging = false; sheet.style.transform = ''; } // moving up: hand back to scroll
-  }, { passive: true });
-  sheet.addEventListener('touchend', () => {
-    if (!dragging) return;
-    dragging = false;
+    if (!engaged) {
+      if (dy > 8) {           // clearly downward: take over the gesture
+        engaged = true;
+        sheet.style.transition = 'none';
+      } else if (dy < -8) {   // upward: this is a scroll, leave it alone
+        active = false;
+        return;
+      } else return;
+    }
+    e.preventDefault();       // stop native scroll / pull-to-refresh
+    sheet.style.transform = `translateY(${Math.max(0, dy)}px)`;
+  }, { passive: false });
+
+  const end = () => {
+    if (!engaged) { active = false; return; }
+    active = false; engaged = false;
     sheet.style.transition = 'transform .2s ease';
     if (dy > 110) closeSheet();
     else sheet.style.transform = '';
-  });
+  };
+  sheet.addEventListener('touchend', end);
+  sheet.addEventListener('touchcancel', end);
 })();
 
 /* Long-press helper: fires after 550 ms of holding still; the click that
@@ -292,6 +306,10 @@ function fmtStock(p) {
   return String(p.stock);
 }
 
+// 'tracked' | 'made' (made to order, never stocked) | 'service' (e.g. Delivery)
+const stockMode = p => p.stockMode || (p.trackStock === false ? 'service' : 'tracked');
+const MODE_TAGS = { made: 'made to order', service: 'service' };
+
 function stockBadge(p) {
   if (p.trackStock === false) return '';
   if (p.stock === 0) return '<span class="badge badge-out"><span class="dot"></span>Out of stock</span>';
@@ -318,7 +336,7 @@ async function renderProducts() {
         </div>
         <div class="row-end">
           ${p.trackStock === false
-            ? '<div class="big">—</div><div class="sub">service</div>'
+            ? `<div class="big">∞</div><div class="sub">${MODE_TAGS[stockMode(p)]}</div>`
             : `<div class="big">${fmtStock(p)}</div><div class="sub">in stock</div>`}
         </div>
       </div>
@@ -415,9 +433,12 @@ async function openProductForm(id) {
           <option value="weight" ${unitType === 'weight' ? 'selected' : ''}>Weight (grams / kilograms)</option>
         </select>
       </label>
-      <label class="field-checkbox">
-        <input type="checkbox" id="pfTrackStock" ${tracked ? 'checked' : ''}>
-        <span>Track stock for this item — uncheck for services like Delivery</span>
+      <label class="field"><span>Stock handling</span>
+        <select id="pfStockMode">
+          <option value="tracked" ${stockMode(p) === 'tracked' ? 'selected' : ''}>Track stock</option>
+          <option value="made" ${stockMode(p) === 'made' ? 'selected' : ''}>Made to order — never stocked</option>
+          <option value="service" ${stockMode(p) === 'service' ? 'selected' : ''}>Service / fee — e.g. Delivery</option>
+        </select>
       </label>
       <div id="pfStockFields">${stockFieldsHTML(unitType, tracked)}</div>
       <button class="btn-filled" id="pfSave">${id ? 'Save changes' : 'Add product'}</button>
@@ -425,7 +446,7 @@ async function openProductForm(id) {
     </div>`);
 
   function redraw() {
-    $('#pfStockFields').innerHTML = stockFieldsHTML($('#pfUnitType').value, $('#pfTrackStock').checked);
+    $('#pfStockFields').innerHTML = stockFieldsHTML($('#pfUnitType').value, $('#pfStockMode').value === 'tracked');
     $('#pfPriceLabel').textContent = $('#pfUnitType').value === 'weight' ? 'Price per kg (฿)' : 'Unit price (฿)';
     bindWeightUnitToggle();
   }
@@ -444,7 +465,7 @@ async function openProductForm(id) {
   }
   bindWeightUnitToggle();
   $('#pfUnitType').onchange = redraw;
-  $('#pfTrackStock').onchange = redraw;
+  $('#pfStockMode').onchange = redraw;
 
   $('#pfSave').onclick = async () => {
     const name = $('#pfName').value.trim();
@@ -453,7 +474,8 @@ async function openProductForm(id) {
     if (!(price >= 0)) return snack('Enter a valid unit price');
 
     const finalUnitType = $('#pfUnitType').value;
-    const trackStock = $('#pfTrackStock').checked;
+    const mode = $('#pfStockMode').value;
+    const trackStock = mode === 'tracked';
     let stock = 0, lowStock = 0;
     if (trackStock) {
       if (finalUnitType === 'weight') {
@@ -468,7 +490,7 @@ async function openProductForm(id) {
 
     const record = {
       ...(id ? { id } : {}),
-      name, sku: $('#pfSku').value.trim(), price, trackStock,
+      name, sku: $('#pfSku').value.trim(), price, trackStock, stockMode: mode,
       unit: finalUnitType, stock, lowStock,
       isDelivery: p.isDelivery || false
     };
@@ -537,10 +559,7 @@ async function renderOrders() {
 
   document.querySelectorAll('#orderList [data-oid]').forEach(el => {
     const o = list.find(x => x.id === Number(el.dataset.oid));
-    attachLongPress(el, () => showConfirm(`Delete order #${o.id} (${o.customerName}, ${fmtMoney(o.total)})? Stock is not restored.`, async () => {
-      await DB.delete('orders', o.id);
-      snack(`Order #${o.id} deleted`); render();
-    }));
+    attachLongPress(el, () => openOrderOptions(o));
   });
 
   document.querySelectorAll('[data-advance]').forEach(btn =>
@@ -552,6 +571,75 @@ async function renderOrders() {
       snack(`Order #${o.id} → ${next}`);
       render();
     }));
+}
+
+/* ----- Order options (long-press) ----- */
+function openOrderOptions(o) {
+  const hasWeight = o.items.some(i => i.unitType === 'weight');
+  openSheet(`
+    <h2>Order #${o.id} · ${esc(o.customerName)}</h2>
+    <div class="form-card">
+      <button class="btn-tonal" id="ooNumber">Change order number</button>
+      ${hasWeight ? '<button class="btn-tonal" id="ooWeights">Adjust sold weights</button>' : ''}
+      <button class="btn-text danger" id="ooDelete">Delete order</button>
+    </div>`);
+
+  $('#ooNumber').onclick = () => {
+    openSheet(`
+      <h2>Change order number</h2>
+      <div class="form-card">
+        <label class="field"><span>New number for order #${o.id}</span>
+          <input type="number" id="onNew" min="1" inputmode="numeric" value="${o.id}">
+        </label>
+        <button class="btn-filled" id="onSave">Save</button>
+      </div>`);
+    $('#onSave').onclick = async () => {
+      const newId = Number($('#onNew').value);
+      if (!(newId >= 1)) return snack('Enter a number of 1 or higher');
+      if (newId === o.id) return closeSheet();
+      try {
+        await DB.changeOrderId(o.id, newId);
+        closeSheet(); snack(`Order #${o.id} is now #${newId}`); render();
+      } catch (err) { snack(err.message); }
+    };
+  };
+
+  const w = $('#ooWeights');
+  if (w) w.onclick = () => {
+    const weightItems = o.items
+      .map((item, idx) => ({ item, idx }))
+      .filter(x => x.item.unitType === 'weight');
+    openSheet(`
+      <h2>Adjust sold weights</h2>
+      <div class="form-card">
+        ${weightItems.map(x => `
+          <label class="field">
+            <span>${esc(x.item.name)} — actual weight (g), was ${fmtGrams(x.item.qty)} at ${fmtMoney(x.item.unitPrice)}/kg</span>
+            <input type="number" min="1" inputmode="numeric" data-widx="${x.idx}" value="${x.item.qty}">
+          </label>`).join('')}
+        <button class="btn-filled" id="owSave">Save weights</button>
+      </div>`);
+    $('#owSave').onclick = async () => {
+      const newQtys = {};
+      let bad = false;
+      document.querySelectorAll('[data-widx]').forEach(inp => {
+        const grams = Number(inp.value);
+        if (!(grams > 0)) bad = true;
+        newQtys[inp.dataset.widx] = grams;
+      });
+      if (bad) return snack('Weights must be greater than 0');
+      await DB.updateOrderWeights(o.id, newQtys);
+      closeSheet(); snack(`Order #${o.id} updated — totals and stock adjusted`); render();
+    };
+  };
+
+  $('#ooDelete').onclick = () => {
+    closeSheet();
+    showConfirm(`Delete order #${o.id} (${o.customerName}, ${fmtMoney(o.total)})? Stock is not restored.`, async () => {
+      await DB.delete('orders', o.id);
+      snack(`Order #${o.id} deleted`); render();
+    });
+  };
 }
 
 /* ----- Order form ----- */
@@ -570,7 +658,7 @@ async function openOrderForm() {
   let lines = [newLine()];
 
   const productOptions = sel => products.map(p =>
-    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} (${p.trackStock === false ? 'service' : fmtStock(p) + ' left'})</option>`).join('');
+    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} (${p.trackStock === false ? MODE_TAGS[stockMode(p)] : fmtStock(p) + ' left'})</option>`).join('');
   const customerOptions = customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
 
   openSheet(`

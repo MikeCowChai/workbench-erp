@@ -173,6 +173,67 @@ const DB = (() => {
        No cross-store transaction needed since nothing else is touched. */
     async receivePurchase(purchase) {
       return api.add('purchases', purchase);
+    },
+
+    /* Atomic: give an order a different number. Fails if the number is taken. */
+    async changeOrderId(oldId, newId) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const t = db.transaction('orders', 'readwrite');
+        const s = t.objectStore('orders');
+        s.get(newId).onsuccess = e => {
+          if (e.target.result) { t.abort(); reject(new Error(`Order #${newId} already exists`)); return; }
+          s.get(oldId).onsuccess = e2 => {
+            const o = e2.target.result;
+            if (!o) { t.abort(); reject(new Error('Order not found')); return; }
+            o.id = newId;
+            s.add(o);
+            s.delete(oldId);
+          };
+        };
+        t.oncomplete = () => resolve();
+        t.onerror = () => reject(t.error);
+      });
+    },
+
+    /* Atomic: update the actual sold grams of weight items on an order.
+       newQtys: { itemIndex: grams }. Recomputes line and order totals and
+       moves the stock difference for tracked products (unless the order
+       skipped stock). */
+    async updateOrderWeights(orderId, newQtys) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const t = db.transaction(['orders', 'products'], 'readwrite');
+        const oStore = t.objectStore('orders');
+        const pStore = t.objectStore('products');
+        oStore.get(orderId).onsuccess = e => {
+          const o = e.target.result;
+          if (!o) { t.abort(); reject(new Error('Order not found')); return; }
+          const deltas = new Map(); // productId -> grams delta
+          Object.entries(newQtys).forEach(([idx, grams]) => {
+            const item = o.items[Number(idx)];
+            if (!item || item.unitType !== 'weight' || !(grams > 0)) return;
+            const delta = grams - item.qty;
+            if (delta !== 0 && !o.skipStock) {
+              deltas.set(item.productId, (deltas.get(item.productId) || 0) + delta);
+            }
+            item.qty = grams;
+            item.lineTotal = Math.floor(grams / 1000 * item.unitPrice);
+          });
+          o.total = o.items.reduce((s, i) => s + (i.lineTotal !== undefined ? i.lineTotal : i.qty * i.unitPrice), 0);
+          oStore.put(o);
+          deltas.forEach((delta, productId) => {
+            pStore.get(productId).onsuccess = ev => {
+              const p = ev.target.result;
+              if (!p || p.trackStock === false) return;
+              p.stock = Math.max(0, p.stock - delta);
+              pStore.put(p);
+            };
+          });
+        };
+        t.oncomplete = () => resolve();
+        t.onerror = () => reject(t.error);
+      });
     }
   };
 
