@@ -5,7 +5,7 @@
    ============================================================ */
 
 const STATUSES = ['In production', 'Ready for shipping', 'Completed'];
-const fmtMoney = n => '$' + (n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtMoney = n => '฿' + (n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
 const fmtDate = ts => new Date(ts).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 const timeAgo = ts => {
   const m = Math.floor((Date.now() - ts) / 60000);
@@ -96,8 +96,8 @@ async function renderDashboard() {
 
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
   const readyToShip = orders.filter(o => o.status === STATUSES[1]).length;
-  const lowStock = products.filter(p => p.stock > 0 && p.stock <= p.lowStock).length;
-  const outOfStock = products.filter(p => p.stock === 0).length;
+  const lowStock = products.filter(p => p.trackStock !== false && p.stock > 0 && p.stock <= p.lowStock).length;
+  const outOfStock = products.filter(p => p.trackStock !== false && p.stock === 0).length;
 
   // Activity feed: newest order events + stock receipts, merged.
   const events = [];
@@ -162,19 +162,33 @@ async function renderDashboard() {
 }
 
 /* ----- Inventory: products ----- */
+// Weight-type products store stock in grams internally; show it humanized.
+function fmtStock(p) {
+  if (p.unit === 'weight') {
+    return p.stock >= 1000
+      ? (p.stock / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' kg'
+      : p.stock + ' g';
+  }
+  return String(p.stock);
+}
+
 function stockBadge(p) {
+  if (p.trackStock === false) return '';
   if (p.stock === 0) return '<span class="badge badge-out"><span class="dot"></span>Out of stock</span>';
-  if (p.stock <= p.lowStock) return `<span class="badge badge-low"><span class="dot"></span>Low stock — ${p.stock} left</span>`;
+  if (p.stock <= p.lowStock) return `<span class="badge badge-low"><span class="dot"></span>Low stock — ${fmtStock(p)} left</span>`;
   return '';
 }
 
+let productsCache = []; // used by the purchase form to look up unit type on selection
+
 async function renderProducts() {
   const products = await DB.getAll('products');
+  productsCache = products;
   const q = state.search.product.toLowerCase();
   let list = products.filter(p =>
     p.name.toLowerCase().includes(q) || (p.sku || '').toLowerCase().includes(q));
-  if (state.stockFilter === 'low') list = list.filter(p => p.stock > 0 && p.stock <= p.lowStock);
-  if (state.stockFilter === 'out') list = list.filter(p => p.stock === 0);
+  if (state.stockFilter === 'low') list = list.filter(p => p.trackStock !== false && p.stock > 0 && p.stock <= p.lowStock);
+  if (state.stockFilter === 'out') list = list.filter(p => p.trackStock !== false && p.stock === 0);
   list.sort((a, b) => a.name.localeCompare(b.name));
 
   $('#productList').innerHTML = list.map(p => `
@@ -182,12 +196,13 @@ async function renderProducts() {
       <div class="row">
         <div class="row-main">
           <div class="name">${esc(p.name)}</div>
-          <div class="sub">${esc(p.sku || 'No SKU')} · ${fmtMoney(p.price)} / unit</div>
+          <div class="sub">${esc(p.sku || 'No SKU')} · ${fmtMoney(p.price)} / ${p.unit === 'weight' ? 'g' : 'unit'}</div>
           ${stockBadge(p)}
         </div>
         <div class="row-end">
-          <div class="big">${p.stock}</div>
-          <div class="sub">in stock</div>
+          ${p.trackStock === false
+            ? '<div class="big">—</div><div class="sub">service</div>'
+            : `<div class="big">${fmtStock(p)}</div><div class="sub">in stock</div>`}
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No products found</div><div>${products.length ? 'Try a different search or filter.' : 'Add your first product with the button below.'}</div></div>`;
@@ -195,11 +210,13 @@ async function renderProducts() {
   document.querySelectorAll('#productList [data-pid]').forEach(el =>
     el.addEventListener('click', () => openProductForm(Number(el.dataset.pid))));
 
-  // Also refresh the purchase form's product dropdown
+  // Also refresh the purchase form's product dropdown — service items (Delivery) have no stock to receive.
   $('#poProduct').innerHTML = products
+    .filter(p => p.trackStock !== false)
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map(p => `<option value="${p.id}">${esc(p.name)} (${p.stock} in stock)</option>`).join('')
-    || '<option value="">— add a product first —</option>';
+    .map(p => `<option value="${p.id}">${esc(p.name)} (${fmtStock(p)} in stock)</option>`).join('')
+    || '<option value="">— add a stock item first —</option>';
+  drawPurchaseFields();
 }
 
 /* ----- Inventory: incoming purchases ----- */
@@ -212,56 +229,170 @@ async function renderPurchases() {
         <div class="row-main">
           <div class="name">${esc(p.productName)}</div>
           <div class="sub">${p.supplier ? esc(p.supplier) + ' · ' : ''}${fmtDate(p.receivedAt)}</div>
+          ${p.priceInfo ? `<div class="sub">${fmtMoney(p.priceInfo.pricePerUnit)} / ${p.priceInfo.unit}</div>` : ''}
         </div>
-        <div class="row-end"><div class="big">+${p.qty}</div><div class="sub">units</div></div>
+        <div class="row-end"><div class="big">+${esc(p.displayQty || p.qty)}</div><div class="sub">received</div></div>
       </div>
     </div>`).join('') || '<div class="empty"><div class="title">No purchases yet</div><div>Stock you receive will appear here.</div></div>';
 }
 
+// The purchase form adapts to the selected product: plain quantity for
+// piece-counted stock, or quantity + g/kg unit + optional cost-per-unit
+// for weight-tracked raw materials (e.g. sand bought in bulk by the kilo).
+function drawPurchaseFields() {
+  const box = $('#poDynamicFields');
+  const pid = Number($('#poProduct').value);
+  const p = productsCache.find(x => x.id === pid);
+  if (!box) return;
+  if (!p) { box.innerHTML = ''; return; }
+
+  if (p.unit === 'weight') {
+    box.innerHTML = `
+      <div class="field-row">
+        <label class="field"><span>Quantity</span><input type="number" id="poQty" min="0.001" step="0.001" inputmode="decimal" value="1"></label>
+        <label class="field"><span>Unit</span><select id="poUnit"><option value="kg" selected>kg</option><option value="g">g</option></select></label>
+      </div>
+      <div class="field-row">
+        <label class="field"><span>Price per unit (฿, optional)</span><input type="number" id="poPrice" min="0" step="0.01" inputmode="decimal" placeholder="e.g. 0.15"></label>
+        <label class="field"><span>Supplier (optional)</span><input type="text" id="poSupplier" placeholder="e.g. Northline Supply"></label>
+      </div>`;
+  } else {
+    box.innerHTML = `
+      <div class="field-row">
+        <label class="field"><span>Quantity</span><input type="number" id="poQty" min="1" value="1" inputmode="numeric"></label>
+        <label class="field"><span>Supplier (optional)</span><input type="text" id="poSupplier" placeholder="e.g. Northline Supply"></label>
+      </div>`;
+  }
+}
+$('#poProduct').addEventListener('change', drawPurchaseFields);
+
 $('#poReceive').addEventListener('click', async () => {
   const productId = Number($('#poProduct').value);
-  const qty = Number($('#poQty').value);
   if (!productId) return snack('Add a product before receiving stock');
-  if (!qty || qty < 1) return snack('Enter a quantity of at least 1');
-  const product = await DB.get('products', productId);
+  const product = productsCache.find(p => p.id === productId) || await DB.get('products', productId);
+  const supplierEl = $('#poSupplier');
+  const supplier = supplierEl ? supplierEl.value.trim() : '';
+
+  let qty, displayQty, priceInfo = null;
+  if (product.unit === 'weight') {
+    const raw = Number($('#poQty').value);
+    const unit = $('#poUnit').value;
+    if (!raw || raw <= 0) return snack('Enter a quantity greater than 0');
+    qty = unit === 'kg' ? raw * 1000 : raw; // stock is always stored in grams
+    displayQty = `${raw} ${unit}`;
+    const pricePerUnit = Number($('#poPrice').value);
+    if (pricePerUnit > 0) priceInfo = { pricePerUnit, unit };
+  } else {
+    const raw = Number($('#poQty').value);
+    if (!raw || raw < 1) return snack('Enter a quantity of at least 1');
+    qty = raw;
+    displayQty = `${raw} pcs`;
+  }
+
   await DB.receivePurchase({
-    productId, productName: product.name, qty,
-    supplier: $('#poSupplier').value.trim(), receivedAt: Date.now()
+    productId, productName: product.name, qty, displayQty, priceInfo,
+    supplier, receivedAt: Date.now()
   });
-  $('#poQty').value = 1; $('#poSupplier').value = '';
-  snack(`Added ${qty} × ${product.name} to stock`);
+  snack(`Added ${displayQty} × ${product.name} to stock`);
   render();
 });
 
 /* ----- Product form ----- */
 async function openProductForm(id) {
-  const p = id ? await DB.get('products', id) : { name: '', sku: '', price: '', stock: 0, lowStock: 5 };
+  const p = id ? await DB.get('products', id) : { name: '', sku: '', price: '', unit: 'pcs', stock: 0, lowStock: 5, trackStock: true };
+  const tracked = p.trackStock !== false;
+  const unitType = p.unit === 'weight' ? 'weight' : 'pcs';
+  let weightUnit = p.stock >= 1000 || p.lowStock >= 1000 || !p.stock ? 'kg' : 'g'; // display preference
+
+  function stockFieldsHTML(ut, isTracked) {
+    if (!isTracked) return '';
+    if (ut === 'weight') {
+      const div = weightUnit === 'kg' ? 1000 : 1;
+      return `
+        <div class="field-row">
+          <label class="field"><span>Stock on hand</span><input id="pfStock" type="number" min="0" step="0.001" inputmode="decimal" value="${(p.stock || 0) / div}"></label>
+          <label class="field"><span>Low-stock at</span><input id="pfLow" type="number" min="0" step="0.001" inputmode="decimal" value="${(p.lowStock || 0) / div}"></label>
+        </div>
+        <label class="field"><span>Entered in</span>
+          <select id="pfWeightUnit"><option value="kg" ${weightUnit === 'kg' ? 'selected' : ''}>kg</option><option value="g" ${weightUnit === 'g' ? 'selected' : ''}>g</option></select>
+        </label>`;
+    }
+    return `
+      <div class="field-row">
+        <label class="field"><span>Stock on hand</span><input id="pfStock" type="number" min="0" inputmode="numeric" value="${p.stock}"></label>
+        <label class="field"><span>Low-stock alert at</span><input id="pfLow" type="number" min="0" inputmode="numeric" value="${p.lowStock}"></label>
+      </div>`;
+  }
+
   openSheet(`
     <h2>${id ? 'Edit product' : 'New product'}</h2>
     <div class="form-card">
       <label class="field"><span>Name</span><input id="pfName" value="${esc(p.name)}" placeholder="e.g. Oak shelf 80 cm"></label>
       <div class="field-row">
         <label class="field"><span>SKU (optional)</span><input id="pfSku" value="${esc(p.sku || '')}" placeholder="OAK-80"></label>
-        <label class="field"><span>Unit price</span><input id="pfPrice" type="number" min="0" step="0.01" inputmode="decimal" value="${p.price}"></label>
+        <label class="field"><span>Unit price (฿)</span><input id="pfPrice" type="number" min="0" step="1" inputmode="numeric" value="${p.price}"></label>
       </div>
-      <div class="field-row">
-        <label class="field"><span>Stock on hand</span><input id="pfStock" type="number" min="0" inputmode="numeric" value="${p.stock}"></label>
-        <label class="field"><span>Low-stock alert at</span><input id="pfLow" type="number" min="0" inputmode="numeric" value="${p.lowStock}"></label>
-      </div>
+      <label class="field"><span>Unit type</span>
+        <select id="pfUnitType">
+          <option value="pcs" ${unitType === 'pcs' ? 'selected' : ''}>Pieces</option>
+          <option value="weight" ${unitType === 'weight' ? 'selected' : ''}>Weight (grams / kilograms)</option>
+        </select>
+      </label>
+      <label class="field-checkbox">
+        <input type="checkbox" id="pfTrackStock" ${tracked ? 'checked' : ''}>
+        <span>Track stock for this item — uncheck for services like Delivery</span>
+      </label>
+      <div id="pfStockFields">${stockFieldsHTML(unitType, tracked)}</div>
       <button class="btn-filled" id="pfSave">${id ? 'Save changes' : 'Add product'}</button>
       ${id ? '<button class="btn-text danger" id="pfDelete">Delete product</button>' : ''}
     </div>`);
+
+  function redraw() {
+    $('#pfStockFields').innerHTML = stockFieldsHTML($('#pfUnitType').value, $('#pfTrackStock').checked);
+    bindWeightUnitToggle();
+  }
+  function bindWeightUnitToggle() {
+    const sel = $('#pfWeightUnit');
+    if (!sel) return;
+    sel.onchange = e => {
+      const newUnit = e.target.value;
+      ['pfStock', 'pfLow'].forEach(id => {
+        const el = $('#' + id);
+        const grams = weightUnit === 'kg' ? Number(el.value || 0) * 1000 : Number(el.value || 0);
+        el.value = newUnit === 'kg' ? grams / 1000 : grams;
+      });
+      weightUnit = newUnit;
+    };
+  }
+  bindWeightUnitToggle();
+  $('#pfUnitType').onchange = redraw;
+  $('#pfTrackStock').onchange = redraw;
 
   $('#pfSave').onclick = async () => {
     const name = $('#pfName').value.trim();
     const price = Number($('#pfPrice').value);
     if (!name) return snack('Give the product a name');
     if (!(price >= 0)) return snack('Enter a valid unit price');
+
+    const finalUnitType = $('#pfUnitType').value;
+    const trackStock = $('#pfTrackStock').checked;
+    let stock = 0, lowStock = 0;
+    if (trackStock) {
+      if (finalUnitType === 'weight') {
+        const factor = weightUnit === 'kg' ? 1000 : 1;
+        stock = Math.max(0, Math.round((Number($('#pfStock').value) || 0) * factor));
+        lowStock = Math.max(0, Math.round((Number($('#pfLow').value) || 0) * factor));
+      } else {
+        stock = Math.max(0, Number($('#pfStock').value) || 0);
+        lowStock = Math.max(0, Number($('#pfLow').value) || 0);
+      }
+    }
+
     const record = {
       ...(id ? { id } : {}),
-      name, sku: $('#pfSku').value.trim(), price,
-      stock: Math.max(0, Number($('#pfStock').value) || 0),
-      lowStock: Math.max(0, Number($('#pfLow').value) || 0)
+      name, sku: $('#pfSku').value.trim(), price, trackStock,
+      unit: finalUnitType, stock, lowStock,
+      isDelivery: p.isDelivery || false
     };
     await DB.put('products', record);
     closeSheet(); snack(id ? 'Product saved' : 'Product added'); render();
@@ -343,7 +474,9 @@ async function openOrderForm() {
       <div id="ofNewCustomer">
         <div class="field-row">
           <label class="field"><span>Customer name</span><input id="ofName" placeholder="Full name"></label>
+          <label class="field"><span>Phone number</span><input id="ofPhone" type="tel" inputmode="tel" placeholder="08x-xxx-xxxx"></label>
         </div>
+        <label class="field"><span>Email (optional)</span><input id="ofEmail" type="email" inputmode="email" placeholder="name@example.com"></label>
       </div>
       <label class="field"><span>Delivery address</span><input id="ofAddress" placeholder="Street, city"></label>
       <h2 class="section-label" style="margin:8px 0 0">Items</h2>
@@ -360,7 +493,7 @@ async function openOrderForm() {
       <div class="line-item" style="margin-bottom:10px">
         <label class="field"><span>Product</span><select data-li="${i}" data-k="productId">${productOptions(l.productId)}</select></label>
         <label class="field"><span>Qty</span><input data-li="${i}" data-k="qty" type="number" min="1" inputmode="numeric" value="${l.qty}"></label>
-        <label class="field"><span>Unit price</span><input data-li="${i}" data-k="unitPrice" type="number" min="0" step="0.01" inputmode="decimal" value="${l.unitPrice}"></label>
+        <label class="field"><span>Unit price (฿)</span><input data-li="${i}" data-k="unitPrice" type="number" min="0" step="1" inputmode="numeric" value="${l.unitPrice}"></label>
         <button class="remove" data-rm="${i}" title="Remove item">✕</button>
       </div>`).join('');
 
@@ -406,8 +539,13 @@ async function openOrderForm() {
       customerName = customers.find(c => c.id === customerId).name;
     } else {
       customerName = $('#ofName').value.trim();
+      const phone = $('#ofPhone').value.trim();
       if (!customerName) return snack('Enter the customer name');
-      customerId = await DB.add('customers', { name: customerName, address, createdAt: Date.now() });
+      if (!phone) return snack('Enter a phone number');
+      customerId = await DB.add('customers', {
+        name: customerName, phone, email: $('#ofEmail').value.trim(),
+        address, createdAt: Date.now()
+      });
     }
 
     const items = lines
@@ -441,7 +579,7 @@ async function renderCustomers() {
   const [customers, orders] = await Promise.all([DB.getAll('customers'), DB.getAll('orders')]);
   const q = state.search.customer.toLowerCase();
   const list = customers
-    .filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q))
+    .filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q) || (c.phone || '').includes(q))
     .map(c => {
       const theirOrders = orders.filter(o => o.customerId === c.id);
       return { ...c, orderCount: theirOrders.length, spent: theirOrders.reduce((s, o) => s + o.total, 0) };
@@ -453,7 +591,7 @@ async function renderCustomers() {
       <div class="row">
         <div class="row-main">
           <div class="name">${esc(c.name)}</div>
-          <div class="sub">${esc(c.address || 'No address on file')}</div>
+          <div class="sub">${esc(c.phone || 'No phone on file')}</div>
         </div>
         <div class="row-end">
           <div class="big">${fmtMoney(c.spent)}</div>
@@ -472,7 +610,8 @@ async function openCustomerDetail(id) {
   const spent = theirs.reduce((s, o) => s + o.total, 0);
   openSheet(`
     <h2>${esc(c.name)}</h2>
-    <div class="sub" style="color:var(--md-on-surface-variant);margin:-8px 0 16px">${esc(c.address || 'No address on file')}</div>
+    <div class="sub" style="color:var(--md-on-surface-variant);margin:-8px 0 2px">${esc(c.phone || 'No phone on file')}${c.email ? ' · ' + esc(c.email) : ''}</div>
+    <div class="sub" style="color:var(--md-on-surface-variant);margin:0 0 16px">${esc(c.address || 'No address on file')}</div>
     <div class="stat-grid">
       <div class="stat-card"><div class="label">Total spent</div><div class="value" style="font-size:24px">${fmtMoney(spent)}</div></div>
       <div class="stat-card"><div class="label">Orders</div><div class="value" style="font-size:24px">${theirs.length}</div></div>
@@ -497,18 +636,27 @@ async function openCustomerDetail(id) {
 }
 
 async function openCustomerForm(id) {
-  const c = id ? await DB.get('customers', id) : { name: '', address: '' };
+  const c = id ? await DB.get('customers', id) : { name: '', phone: '', email: '', address: '' };
   openSheet(`
     <h2>${id ? 'Edit customer' : 'New customer'}</h2>
     <div class="form-card">
       <label class="field"><span>Name</span><input id="cfName" value="${esc(c.name)}"></label>
+      <label class="field"><span>Phone number</span><input id="cfPhone" type="tel" inputmode="tel" value="${esc(c.phone || '')}" placeholder="08x-xxx-xxxx"></label>
+      <label class="field"><span>Email (optional)</span><input id="cfEmail" type="email" inputmode="email" value="${esc(c.email || '')}" placeholder="name@example.com"></label>
       <label class="field"><span>Address</span><input id="cfAddress" value="${esc(c.address || '')}"></label>
       <button class="btn-filled" id="cfSave">${id ? 'Save changes' : 'Add customer'}</button>
     </div>`);
   $('#cfSave').onclick = async () => {
     const name = $('#cfName').value.trim();
+    const phone = $('#cfPhone').value.trim();
     if (!name) return snack('Enter the customer name');
-    await DB.put('customers', { ...(id ? { id } : {}), name, address: $('#cfAddress').value.trim(), createdAt: c.createdAt || Date.now() });
+    if (!phone) return snack('Enter a phone number');
+    await DB.put('customers', {
+      ...(id ? { id } : {}), name, phone,
+      email: $('#cfEmail').value.trim(),
+      address: $('#cfAddress').value.trim(),
+      createdAt: c.createdAt || Date.now()
+    });
     closeSheet(); snack(id ? 'Customer saved' : 'Customer added'); render();
   };
 }
@@ -552,8 +700,8 @@ async function seedSampleData() {
   const pids = [];
   for (const p of products) pids.push(await DB.add('products', p));
 
-  const c1 = await DB.add('customers', { name: 'Maren Holt', address: '14 Birch Lane, Riverton', createdAt: Date.now() - 86400000 * 20 });
-  const c2 = await DB.add('customers', { name: 'Tobias Lind', address: '3 Harbor St, Eastport', createdAt: Date.now() - 86400000 * 9 });
+  const c1 = await DB.add('customers', { name: 'Maren Holt', phone: '081-234-5678', email: 'maren.holt@example.com', address: '14 Birch Lane, Riverton', createdAt: Date.now() - 86400000 * 20 });
+  const c2 = await DB.add('customers', { name: 'Tobias Lind', phone: '089-876-5432', email: '', address: '3 Harbor St, Eastport', createdAt: Date.now() - 86400000 * 9 });
 
   const day = 86400000;
   await DB.add('orders', {
@@ -578,10 +726,25 @@ async function seedSampleData() {
   render();
 }
 
+/* ---------------- Bootstrap: default Delivery item ---------------- */
+// Runs once ever (tracked via localStorage, not IndexedDB, since it's just
+// an app-setup flag). Safe for both brand-new and already-in-use databases.
+async function ensureDeliveryProduct() {
+  if (localStorage.getItem('erp_delivery_seeded')) return;
+  const products = await DB.getAll('products');
+  if (!products.some(p => p.isDelivery)) {
+    await DB.add('products', {
+      name: 'Delivery', sku: 'DELIVERY', price: 99,
+      stock: 0, lowStock: 0, trackStock: false, isDelivery: true
+    });
+  }
+  localStorage.setItem('erp_delivery_seeded', '1');
+}
+
 /* ---------------- PWA: service worker ---------------- */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
 }
 
 /* ---------------- Boot ---------------- */
-switchView('dashboard');
+ensureDeliveryProduct().then(() => switchView('dashboard'));
