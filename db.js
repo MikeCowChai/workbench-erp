@@ -92,13 +92,21 @@ const DB = (() => {
           const getReq = products.get(item.productId);
           getReq.onsuccess = () => {
             const p = getReq.result;
-            if (!p || p.stock < item.qty) {
+            if (!p) {
               t.abort();
-              reject(new Error(`Not enough stock for ${item.name}`));
+              reject(new Error(`Product not found: ${item.name}`));
               return;
             }
-            p.stock -= item.qty;
-            products.put(p);
+            // Service items (e.g. Delivery) carry no stock — skip the check entirely.
+            if (p.trackStock !== false) {
+              if (p.stock < item.qty) {
+                t.abort();
+                reject(new Error(`Not enough stock for ${item.name}`));
+                return;
+              }
+              p.stock -= item.qty;
+              products.put(p);
+            }
             if (--pending === 0) {
               const addReq = t.objectStore('orders').add(order);
               addReq.onsuccess = () => { orderId = addReq.result; };
@@ -121,6 +129,7 @@ const DB = (() => {
         getReq.onsuccess = () => {
           const p = getReq.result;
           if (!p) { t.abort(); reject(new Error('Product not found')); return; }
+          if (p.trackStock === false) { t.abort(); reject(new Error('This item has no stock to receive')); return; }
           p.stock += purchase.qty;
           products.put(p);
           t.objectStore('purchases').add(purchase);
