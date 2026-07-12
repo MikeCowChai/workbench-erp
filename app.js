@@ -4,9 +4,14 @@
           Orders · Customers
    ============================================================ */
 
-const STATUSES = ['In production', 'Ready for shipping', 'Completed'];
+const STATUSES = ['In production', 'Ready for shipping', 'Completed', 'Delivered'];
 const fmtMoney = n => '฿' + (n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
-const fmtDate = ts => new Date(ts).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+const fmtDate = ts => {
+  const d = new Date(ts);
+  const opts = { day: 'numeric', month: 'short' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString(undefined, opts);
+};
 const timeAgo = ts => {
   const m = Math.floor((Date.now() - ts) / 60000);
   if (m < 1) return 'just now';
@@ -24,12 +29,14 @@ const state = {
   invTab: 'stock',
   stockFilter: 'all',
   statusFilter: 'all',
+  period: 'month', // dashboard stats: 'month' | 'quarter' | 'year'
   search: { product: '', order: '', customer: '' }
 };
 
 /* ---------------- Navigation ---------------- */
 const VIEW_TITLES = { dashboard: 'Dashboard', inventory: 'Inventory', orders: 'Orders', customers: 'Customers' };
 const FAB_CONFIG = {
+  dashboard: { label: 'Order',   action: () => openOrderForm() },
   inventory: { label: 'Product', action: () => openProductForm() },
   orders:    { label: 'Order',   action: () => openOrderForm() },
   customers: { label: 'Customer',action: () => openCustomerForm() }
@@ -155,12 +162,23 @@ async function renderDashboard() {
   ]);
 
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const periodStart = {
+    month:   new Date(now.getFullYear(), now.getMonth(), 1),
+    quarter: new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1),
+    year:    new Date(now.getFullYear(), 0, 1)
+  }[state.period].getTime();
+  const periodLabel = {
+    month:   now.toLocaleDateString(undefined, { month: 'long' }),
+    quarter: 'Q' + (Math.floor(now.getMonth() / 3) + 1) + ' ' + now.getFullYear(),
+    year:    String(now.getFullYear())
+  }[state.period];
+
   // Payment is taken before shipping, so every order placed counts as revenue.
-  const monthOrders = orders.filter(o => o.createdAt >= monthStart);
-  const revenue = monthOrders.reduce((s, o) => s + o.total, 0);
-  const monthPurchases = purchases.filter(pu => pu.receivedAt >= monthStart);
-  const costs = monthPurchases.reduce((s, pu) => s + (pu.amount || 0), 0);
+  const periodOrders = orders.filter(o => o.createdAt >= periodStart);
+  const revenue = periodOrders.reduce((s, o) => s + o.total, 0);
+  const periodPurchases = purchases.filter(pu => pu.receivedAt >= periodStart);
+  const costs = periodPurchases.reduce((s, pu) => s + (pu.amount || 0), 0);
+  const profit = revenue - costs;
 
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
   const readyToShip = orders.filter(o => o.status === STATUSES[1]).length;
@@ -184,11 +202,26 @@ async function renderDashboard() {
       <div>Add products and orders, or start with sample data to explore the app.</div>
       <button class="btn-tonal" id="seedBtn">Load sample data</button>
     </div>` : `
+    <div class="chip-row" id="periodChips">
+      <button class="chip ${state.period === 'month' ? 'is-selected' : ''}" data-period="month">Month</button>
+      <button class="chip ${state.period === 'quarter' ? 'is-selected' : ''}" data-period="quarter">Quarter</button>
+      <button class="chip ${state.period === 'year' ? 'is-selected' : ''}" data-period="year">Year</button>
+    </div>
     <div class="stat-grid">
       <div class="stat-card hero">
-        <div class="label">Revenue · ${now.toLocaleDateString(undefined, { month: 'long' })}</div>
+        <div class="label">Revenue · ${periodLabel}</div>
         <div class="value">${fmtMoney(revenue)}</div>
-        <div class="hint">${monthOrders.length} order${monthOrders.length === 1 ? '' : 's'} this month</div>
+        <div class="hint">${periodOrders.length} order${periodOrders.length === 1 ? '' : 's'}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Costs · ${periodLabel}</div>
+        <div class="value">${fmtMoney(costs)}</div>
+        <div class="hint">${periodPurchases.length} purchase${periodPurchases.length === 1 ? '' : 's'}</div>
+      </div>
+      <div class="stat-card ${profit < 0 ? 'warn' : ''}">
+        <div class="label">Profit · ${periodLabel}</div>
+        <div class="value">${profit < 0 ? '−' + fmtMoney(-profit) : fmtMoney(profit)}</div>
+        <div class="hint">revenue − costs</div>
       </div>
       <div class="stat-card">
         <div class="label">In production</div>
@@ -197,11 +230,6 @@ async function renderDashboard() {
       <div class="stat-card">
         <div class="label">Ready for shipping</div>
         <div class="value">${readyToShip}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Costs · ${now.toLocaleDateString(undefined, { month: 'long' })}</div>
-        <div class="value">${fmtMoney(costs)}</div>
-        <div class="hint">${monthPurchases.length} purchase${monthPurchases.length === 1 ? '' : 's'} logged</div>
       </div>
       ${(lowStock + outOfStock) ? `
       <div class="stat-card warn" style="grid-column:1/-1" id="lowStockCard" role="button" tabindex="0">
@@ -232,6 +260,8 @@ async function renderDashboard() {
   if (seed) seed.onclick = seedSampleData;
   const lowCard = $('#lowStockCard');
   if (lowCard) lowCard.onclick = () => { state.stockFilter = 'low'; switchView('inventory'); syncStockChips(); };
+  document.querySelectorAll('#periodChips [data-period]').forEach(chip =>
+    chip.addEventListener('click', () => { state.period = chip.dataset.period; renderDashboard(); }));
 }
 
 /* ----- Inventory: products ----- */
@@ -437,13 +467,14 @@ async function openProductForm(id) {
 /* ----- Orders ----- */
 function railHTML(order) {
   const idx = STATUSES.indexOf(order.status);
+  const last = STATUSES.length - 1;
   return `
     <div class="rail">
-      ${STATUSES.map((s, i) => `<div class="rail-seg ${i < idx ? 'is-done' : i === idx ? (idx === 2 ? 'is-done' : 'is-current') : ''}"></div>`).join('')}
+      ${STATUSES.map((s, i) => `<div class="rail-seg ${i < idx ? 'is-done' : i === idx ? (idx === last ? 'is-done' : 'is-current') : ''}"></div>`).join('')}
     </div>
-    <div class="rail-labels"><span>Production</span><span>Ready</span><span>Shipped</span></div>
-    <div class="rail-status ${idx === 2 ? 'is-completed' : ''}">${order.status}</div>
-    ${idx < 2 ? `<button class="advance-btn" data-advance="${order.id}">Mark as “${STATUSES[idx + 1]}”</button>` : ''}`;
+    <div class="rail-labels"><span>Production</span><span>Ready</span><span>Completed</span><span>Delivered</span></div>
+    <div class="rail-status ${idx === last ? 'is-completed' : ''}">${order.status}</div>
+    ${idx < last ? `<button class="advance-btn" data-advance="${order.id}">Mark as “${STATUSES[idx + 1]}”</button>` : ''}`;
 }
 
 async function renderOrders() {
@@ -517,6 +548,7 @@ async function openOrderForm() {
         <label class="field"><span>Email (optional)</span><input id="ofEmail" type="email" inputmode="email" placeholder="name@example.com"></label>
       </div>
       <label class="field"><span>Delivery address</span><input id="ofAddress" placeholder="Street, city"></label>
+      <label class="field"><span>Order date</span><input type="date" id="ofDate"></label>
       <h2 class="section-label" style="margin:8px 0 0">Items</h2>
       <div id="ofLines"></div>
       <button class="btn-tonal" id="ofAddLine">＋ Add item</button>
@@ -558,6 +590,9 @@ async function openOrderForm() {
   }
 
   $('#ofAddLine').onclick = () => { lines.push({ productId: products[0].id, qty: 1, unitPrice: products[0].price }); drawLines(); };
+  // Prefill order date with today (local time)
+  const _t = new Date();
+  $('#ofDate').value = `${_t.getFullYear()}-${String(_t.getMonth() + 1).padStart(2, '0')}-${String(_t.getDate()).padStart(2, '0')}`;
   $('#ofCustomer').onchange = async e => {
     const id = Number(e.target.value);
     $('#ofNewCustomer').hidden = !!id;
@@ -594,10 +629,19 @@ async function openOrderForm() {
       });
     if (!items.length) return snack('Add at least one item');
 
+    // Order date: today keeps the exact current time (so activity ordering
+    // stays natural); a backdated order is stored at noon local time.
+    const dateStr = $('#ofDate').value;
+    if (!dateStr) return snack('Pick an order date');
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const today = new Date();
+    const isToday = y === today.getFullYear() && m === today.getMonth() + 1 && d === today.getDate();
+    const createdAt = isToday ? Date.now() : new Date(y, m - 1, d, 12).getTime();
+
     const order = {
       customerId, customerName, address, items,
       total: items.reduce((s, i) => s + i.qty * i.unitPrice, 0),
-      status: STATUSES[0], createdAt: Date.now(), statusChangedAt: null
+      status: STATUSES[0], createdAt, statusChangedAt: null
     };
 
     try {
