@@ -234,6 +234,11 @@ h1, h2, h3 { margin: 0; font-weight: 500; }
   border-color: var(--md-primary); box-shadow: 0 0 0 1px var(--md-primary);
 }
 .field-row { display: flex; gap: 10px; }
+.field-checkbox {
+  display: flex; align-items: flex-start; gap: 10px;
+  font-size: 13.5px; color: var(--md-on-surface-variant); padding: 4px 0;
+}
+.field-checkbox input { flex: none; width: 18px; height: 18px; margin-top: 1px; accent-color: var(--md-primary); }
 
 .btn-filled {
   background: var(--md-primary); color: var(--md-on-primary);
