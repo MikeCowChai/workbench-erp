@@ -78,43 +78,93 @@ const DB = (() => {
       return reqToPromise(db.transaction(store, 'readwrite').objectStore(store).delete(id));
     },
 
-    /* Atomic: create an order and decrement stock in ONE transaction,
-       so a crash can never leave stock and orders out of sync. */
-    async createOrderWithStock(order) {
+    /* Atomic: create an order and reserve stock in ONE transaction.
+       - deduct=false: past orders that were already fulfilled — stock untouched.
+       - deduct=true: take what's available; any shortfall is stored on the
+         item as pendingQty ("awaiting stock") instead of failing the order. */
+    async createOrderWithStock(order, deduct = true) {
       const db = await open();
       return new Promise((resolve, reject) => {
         const t = db.transaction(['orders', 'products'], 'readwrite');
         const products = t.objectStore('products');
         let orderId = null;
 
-        let pending = order.items.length;
-        order.items.forEach(item => {
-          const getReq = products.get(item.productId);
-          getReq.onsuccess = () => {
-            const p = getReq.result;
-            if (!p) {
-              t.abort();
-              reject(new Error(`Product not found: ${item.name}`));
-              return;
-            }
-            // Service items (e.g. Delivery) carry no stock — skip the check entirely.
-            if (p.trackStock !== false) {
-              if (p.stock < item.qty) {
+        const finish = () => {
+          const addReq = t.objectStore('orders').add(order);
+          addReq.onsuccess = () => { orderId = addReq.result; };
+        };
+
+        if (!deduct) {
+          order.items.forEach(i => { i.pendingQty = 0; });
+          order.skipStock = true;
+          finish();
+        } else {
+          let pending = order.items.length;
+          order.items.forEach(item => {
+            const getReq = products.get(item.productId);
+            getReq.onsuccess = () => {
+              const p = getReq.result;
+              if (!p) {
                 t.abort();
-                reject(new Error(`Not enough stock for ${item.name}`));
+                reject(new Error(`Product not found: ${item.name}`));
                 return;
               }
-              p.stock -= item.qty;
-              products.put(p);
-            }
-            if (--pending === 0) {
-              const addReq = t.objectStore('orders').add(order);
-              addReq.onsuccess = () => { orderId = addReq.result; };
-            }
-          };
-        });
+              if (p.trackStock === false) {
+                item.pendingQty = 0; // services (Delivery) never wait for stock
+              } else {
+                const take = Math.min(p.stock, item.qty);
+                p.stock -= take;
+                item.pendingQty = item.qty - take;
+                products.put(p);
+              }
+              if (--pending === 0) finish();
+            };
+          });
+        }
 
         t.oncomplete = () => resolve(orderId);
+        t.onerror = () => reject(t.error);
+      });
+    },
+
+    /* Atomic: after a product's stock is raised, hand the new stock to
+       orders still awaiting it (oldest order first). Returns what was
+       allocated so the UI can report it. */
+    async allocatePending(productId) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const t = db.transaction(['orders', 'products'], 'readwrite');
+        const pStore = t.objectStore('products');
+        const oStore = t.objectStore('orders');
+        const allocations = [];
+
+        pStore.get(productId).onsuccess = e => {
+          const p = e.target.result;
+          if (!p || p.trackStock === false || p.stock <= 0) return;
+          oStore.getAll().onsuccess = ev => {
+            const waiting = ev.target.result
+              .filter(o => o.items.some(i => i.productId === productId && i.pendingQty > 0))
+              .sort((a, b) => a.createdAt - b.createdAt);
+            for (const o of waiting) {
+              let changed = false;
+              for (const i of o.items) {
+                if (i.productId !== productId || !(i.pendingQty > 0)) continue;
+                const take = Math.min(p.stock, i.pendingQty);
+                if (take > 0) {
+                  p.stock -= take;
+                  i.pendingQty -= take;
+                  changed = true;
+                  allocations.push({ orderId: o.id, name: i.name, qty: take });
+                }
+              }
+              if (changed) oStore.put(o);
+              if (p.stock === 0) break;
+            }
+            pStore.put(p);
+          };
+        };
+
+        t.oncomplete = () => resolve(allocations);
         t.onerror = () => reject(t.error);
       });
     },

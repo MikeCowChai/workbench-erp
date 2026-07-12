@@ -144,7 +144,7 @@ function snack(msg) {
   el.textContent = msg;
   el.hidden = false;
   clearTimeout(snackTimer);
-  snackTimer = setTimeout(() => { el.hidden = true; }, 2800);
+  snackTimer = setTimeout(() => { el.hidden = true; }, Math.min(6000, 2800 + msg.length * 25));
 }
 
 /* ---------------- Rendering ---------------- */
@@ -182,6 +182,8 @@ async function renderDashboard() {
 
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
   const readyToShip = orders.filter(o => o.status === STATUSES[1]).length;
+  // Current stock value at selling price; services (no stock) contribute 0.
+  const stockValue = products.reduce((s, p) => s + (p.trackStock !== false ? p.stock * (p.price || 0) : 0), 0);
   const lowStock = products.filter(p => p.trackStock !== false && p.stock > 0 && p.stock <= p.lowStock).length;
   const outOfStock = products.filter(p => p.trackStock !== false && p.stock === 0).length;
 
@@ -230,6 +232,11 @@ async function renderDashboard() {
       <div class="stat-card">
         <div class="label">Ready for shipping</div>
         <div class="value">${readyToShip}</div>
+      </div>
+      <div class="stat-card" style="grid-column:1/-1">
+        <div class="label">Stock value</div>
+        <div class="value">${fmtMoney(stockValue)}</div>
+        <div class="hint">current stock × selling price</div>
       </div>
       ${(lowStock + outOfStock) ? `
       <div class="stat-card warn" style="grid-column:1/-1" id="lowStockCard" role="button" tabindex="0">
@@ -454,8 +461,18 @@ async function openProductForm(id) {
       unit: finalUnitType, stock, lowStock,
       isDelivery: p.isDelivery || false
     };
-    await DB.put('products', record);
-    closeSheet(); snack(id ? 'Product saved' : 'Product added'); render();
+    const savedId = await DB.put('products', record);
+    // New stock first goes to orders that were waiting for it (oldest first).
+    let allocMsg = '';
+    if (record.trackStock && record.stock > 0) {
+      const allocations = await DB.allocatePending(id || savedId);
+      if (allocations.length) {
+        const total = allocations.reduce((s, a) => s + a.qty, 0);
+        const orderIds = [...new Set(allocations.map(a => '#' + a.orderId))].join(', ');
+        allocMsg = ` — ${total} unit${total === 1 ? '' : 's'} assigned to waiting order${orderIds.includes(',') ? 's' : ''} ${orderIds}`;
+      }
+    }
+    closeSheet(); snack((id ? 'Product saved' : 'Product added') + allocMsg); render();
   };
   const del = $('#pfDelete');
   if (del) del.onclick = async () => {
@@ -487,13 +504,16 @@ async function renderOrders() {
   if (state.statusFilter !== 'all') list = list.filter(o => o.status === state.statusFilter);
   list.sort((a, b) => b.createdAt - a.createdAt);
 
-  $('#orderList').innerHTML = list.map(o => `
+  $('#orderList').innerHTML = list.map(o => {
+    const waiting = o.items.filter(i => i.pendingQty > 0);
+    return `
     <div class="card" data-oid="${o.id}">
       <div class="row">
         <div class="row-main">
           <div class="name">#${o.id} · ${esc(o.customerName)}</div>
           <div class="sub">${esc(o.address)}</div>
           <div class="sub">${o.items.map(i => `${i.qty} × ${esc(i.name)}`).join(', ')}</div>
+          ${waiting.length ? `<span class="badge badge-low"><span class="dot"></span>Awaiting stock: ${waiting.map(i => `${i.pendingQty} × ${esc(i.name)}`).join(', ')}</span>` : ''}
         </div>
         <div class="row-end">
           <div class="big">${fmtMoney(o.total)}</div>
@@ -501,7 +521,8 @@ async function renderOrders() {
         </div>
       </div>
       ${railHTML(o)}
-    </div>`).join('') || `<div class="empty"><div class="title">No orders found</div><div>${orders.length ? 'Try a different search or status filter.' : 'Create your first order with the button below.'}</div></div>`;
+    </div>`;
+  }).join('') || `<div class="empty"><div class="title">No orders found</div><div>${orders.length ? 'Try a different search or status filter.' : 'Create your first order with the button below.'}</div></div>`;
 
   document.querySelectorAll('#orderList [data-oid]').forEach(el => {
     const o = list.find(x => x.id === Number(el.dataset.oid));
@@ -552,7 +573,11 @@ async function openOrderForm() {
       <h2 class="section-label" style="margin:8px 0 0">Items</h2>
       <div id="ofLines"></div>
       <button class="btn-tonal" id="ofAddLine">＋ Add item</button>
-      <div class="order-total"><span>Total</span><span id="ofTotal">$0.00</span></div>
+      <div class="order-total"><span>Total</span><span id="ofTotal">฿0</span></div>
+      <label class="field-checkbox">
+        <input type="checkbox" id="ofDeduct" checked>
+        <span>Deduct items from stock — uncheck for past orders that were already fulfilled</span>
+      </label>
       <button class="btn-filled" id="ofCreate">Create order</button>
     </div>`);
 
@@ -645,11 +670,18 @@ async function openOrderForm() {
     };
 
     try {
-      const orderId = await DB.createOrderWithStock(order);
-      closeSheet(); snack(`Order #${orderId} created — in production`);
+      const deduct = $('#ofDeduct').checked;
+      const orderId = await DB.createOrderWithStock(order, deduct);
+      closeSheet();
+      const waiting = order.items.filter(i => i.pendingQty > 0);
+      if (waiting.length) {
+        snack(`Order #${orderId} created — awaiting stock: ${waiting.map(i => `${i.pendingQty} × ${i.name}`).join(', ')}`);
+      } else {
+        snack(`Order #${orderId} created — in production`);
+      }
       render();
     } catch (err) {
-      snack(err.message); // e.g. "Not enough stock for Oak shelf"
+      snack(err.message);
     }
   };
 
