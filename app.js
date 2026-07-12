@@ -551,6 +551,7 @@ async function renderOrders() {
         <div class="row-end">
           <div class="big">${fmtMoney(o.total)}</div>
           <div class="sub">${fmtDate(o.createdAt)}</div>
+          ${o.discountPct > 0 ? `<div class="sub">${o.discountPct}% discount</div>` : ''}
         </div>
       </div>
       ${railHTML(o)}
@@ -679,7 +680,10 @@ async function openOrderForm() {
       <h2 class="section-label" style="margin:8px 0 0">Items</h2>
       <div id="ofLines"></div>
       <button class="btn-tonal" id="ofAddLine">＋ Add item</button>
-      <div class="order-total"><span>Total</span><span id="ofTotal">฿0</span></div>
+      <label class="field" style="margin-top:4px"><span>Discount (%)</span>
+        <input id="ofDiscount" type="number" min="0" max="100" step="1" inputmode="numeric" value="0" placeholder="0">
+      </label>
+      <div id="ofTotals"></div>
       <label class="field-checkbox">
         <input type="checkbox" id="ofDeduct" checked>
         <span>Deduct items from stock — uncheck for past orders that were already fulfilled</span>
@@ -727,11 +731,19 @@ async function openOrderForm() {
     updateTotal();
   }
   function updateTotal() {
-    const t = lines.reduce((s, l) => s + lineTotal(l), 0);
-    $('#ofTotal').textContent = fmtMoney(t);
+    const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
+    const pct = Math.min(100, Math.max(0, Number($('#ofDiscount').value) || 0));
+    const discount = Math.ceil(subtotal * pct / 100); // discount rounds UP → total rounds down
+    const total = subtotal - discount;
+    $('#ofTotals').innerHTML = pct > 0 ? `
+      <div class="order-total" style="font-weight:400;font-size:14px;color:var(--md-on-surface-variant)"><span>Subtotal</span><span>${fmtMoney(subtotal)}</span></div>
+      <div class="order-total" style="font-weight:400;font-size:14px;color:var(--md-on-surface-variant)"><span>Discount ${pct}%</span><span>−${fmtMoney(discount)}</span></div>
+      <div class="order-total"><span>Total</span><span>${fmtMoney(total)}</span></div>` : `
+      <div class="order-total"><span>Total</span><span>${fmtMoney(total)}</span></div>`;
   }
 
   $('#ofAddLine').onclick = () => { lines.push(newLine()); drawLines(); };
+  $('#ofDiscount').addEventListener('input', updateTotal);
   // Prefill order date with today (local time)
   const _t = new Date();
   $('#ofDate').value = `${_t.getFullYear()}-${String(_t.getMonth() + 1).padStart(2, '0')}-${String(_t.getDate()).padStart(2, '0')}`;
@@ -786,9 +798,13 @@ async function openOrderForm() {
     const isToday = y === today.getFullYear() && m === today.getMonth() + 1 && d === today.getDate();
     const createdAt = isToday ? Date.now() : new Date(y, m - 1, d, 12).getTime();
 
+    const subtotal = items.reduce((s, i) => s + i.lineTotal, 0);
+    const discountPct = Math.min(100, Math.max(0, Number($('#ofDiscount').value) || 0));
+    const discount = Math.ceil(subtotal * discountPct / 100);
     const order = {
       customerId, customerName, address, items,
-      total: items.reduce((s, i) => s + i.lineTotal, 0),
+      subtotal, discountPct,
+      total: subtotal - discount,
       status: STATUSES[0], createdAt, statusChangedAt: null
     };
 
@@ -869,7 +885,7 @@ async function openCustomerDetail(id) {
               <div class="sub">${o.items.map(i => itemLabel(i)).join(', ')}</div>
               <div class="sub" style="font-weight:600;color:var(--md-primary)">${o.status}</div>
             </div>
-            <div class="row-end"><div class="big">${fmtMoney(o.total)}</div></div>
+            <div class="row-end"><div class="big">${fmtMoney(o.total)}</div>${o.discountPct > 0 ? `<div class="sub">${o.discountPct}% discount</div>` : ''}</div>
           </div>
         </div>`).join('') || '<div class="empty">No orders yet.</div>'}
     </div>

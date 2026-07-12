@@ -220,7 +220,10 @@ const DB = (() => {
             item.qty = grams;
             item.lineTotal = Math.floor(grams / 1000 * item.unitPrice);
           });
-          o.total = o.items.reduce((s, i) => s + (i.lineTotal !== undefined ? i.lineTotal : i.qty * i.unitPrice), 0);
+          const subtotal = o.items.reduce((s, i) => s + (i.lineTotal !== undefined ? i.lineTotal : i.qty * i.unitPrice), 0);
+          o.subtotal = subtotal;
+          const pct = o.discountPct || 0;
+          o.total = subtotal - Math.ceil(subtotal * pct / 100);
           oStore.put(o);
           deltas.forEach((delta, productId) => {
             pStore.get(productId).onsuccess = ev => {
