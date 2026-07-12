@@ -1,10 +1,12 @@
 {
+  "id": "./",
   "name": "Workbench ERP",
   "short_name": "Workbench",
   "description": "Offline mini-ERP: inventory, sales, invoicing and customers — all data stays on your device.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
   "background_color": "#F5FAF7",
   "theme_color": "#006A60",

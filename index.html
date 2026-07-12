@@ -122,6 +122,16 @@
 
 <div class="snackbar" id="snackbar" hidden></div>
 
+<!-- Confirm dialog (for long-press delete) -->
+<div class="scrim" id="confirmScrim" hidden></div>
+<div class="dialog" id="confirmDialog" hidden>
+  <div class="dialog-text" id="confirmText"></div>
+  <div class="dialog-actions">
+    <button class="btn-text" id="confirmCancel">Cancel</button>
+    <button class="btn-text danger" id="confirmOk">Delete</button>
+  </div>
+</div>
+
 <script src="db.js"></script>
 <script src="app.js"></script>
 </body>

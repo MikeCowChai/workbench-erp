@@ -284,6 +284,19 @@ h1, h2, h3 { margin: 0; font-weight: 500; }
   .sheet, .scrim { animation: none; }
 }
 
+/* ---------- Confirm dialog ---------- */
+.dialog {
+  position: fixed; left: 24px; right: 24px; top: 50%; z-index: 70;
+  transform: translateY(-50%);
+  background: var(--md-surface-container-high);
+  border-radius: 28px; padding: 24px;
+  box-shadow: var(--md-elev-3);
+  max-width: 360px; margin: 0 auto;
+  animation: fade .15s;
+}
+.dialog-text { font-size: 15px; margin-bottom: 18px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 4px; }
+
 /* ---------- Snackbar ---------- */
 .snackbar {
   position: fixed; left: 16px; right: 16px; z-index: 60;

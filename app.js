@@ -56,14 +56,80 @@ document.querySelectorAll('.nav-item').forEach(b =>
 /* ---------------- Sheet (modal) ---------------- */
 function openSheet(html) {
   $('#sheetContent').innerHTML = html;
-  $('#sheet').hidden = false;
+  const sheet = $('#sheet');
+  sheet.style.transform = '';
+  sheet.hidden = false;
   $('#scrim').hidden = false;
 }
 function closeSheet() {
   $('#sheet').hidden = true;
   $('#scrim').hidden = true;
+  $('#sheet').style.transform = '';
 }
 $('#scrim').addEventListener('click', closeSheet);
+
+/* Swipe down on the sheet to dismiss it (only when its content is
+   scrolled to the top, so normal scrolling inside keeps working). */
+(function enableSheetDrag() {
+  const sheet = $('#sheet');
+  let startY = 0, dy = 0, dragging = false;
+  sheet.addEventListener('touchstart', e => {
+    if (sheet.scrollTop > 0) return;
+    startY = e.touches[0].clientY;
+    dy = 0; dragging = true;
+    sheet.style.transition = 'none';
+  }, { passive: true });
+  sheet.addEventListener('touchmove', e => {
+    if (!dragging) return;
+    dy = e.touches[0].clientY - startY;
+    if (dy > 0) sheet.style.transform = `translateY(${dy}px)`;
+    else { dragging = false; sheet.style.transform = ''; } // moving up: hand back to scroll
+  }, { passive: true });
+  sheet.addEventListener('touchend', () => {
+    if (!dragging) return;
+    dragging = false;
+    sheet.style.transition = 'transform .2s ease';
+    if (dy > 110) closeSheet();
+    else sheet.style.transform = '';
+  });
+})();
+
+/* Long-press helper: fires after 550 ms of holding still; the click that
+   follows a long-press is swallowed so it doesn't also open the item. */
+function attachLongPress(el, fn) {
+  let timer = null, fired = false;
+  const start = () => {
+    fired = false;
+    timer = setTimeout(() => {
+      fired = true;
+      if (navigator.vibrate) navigator.vibrate(30);
+      fn();
+    }, 550);
+  };
+  const cancel = () => clearTimeout(timer);
+  el.addEventListener('touchstart', start, { passive: true });
+  el.addEventListener('touchmove', cancel, { passive: true });
+  el.addEventListener('touchend', cancel);
+  el.addEventListener('touchcancel', cancel);
+  el.addEventListener('mousedown', start);   // desktop testing
+  el.addEventListener('mouseup', cancel);
+  el.addEventListener('mouseleave', cancel);
+  el.addEventListener('contextmenu', e => e.preventDefault());
+  el.addEventListener('click', e => {
+    if (fired) { e.stopImmediatePropagation(); e.preventDefault(); fired = false; }
+  }, true);
+}
+
+/* Confirm dialog for destructive actions. */
+function showConfirm(message, onConfirm) {
+  $('#confirmText').textContent = message;
+  $('#confirmDialog').hidden = false;
+  $('#confirmScrim').hidden = false;
+  const close = () => { $('#confirmDialog').hidden = true; $('#confirmScrim').hidden = true; };
+  $('#confirmCancel').onclick = close;
+  $('#confirmScrim').onclick = close;
+  $('#confirmOk').onclick = () => { close(); onConfirm(); };
+}
 
 let snackTimer = null;
 function snack(msg) {
@@ -211,8 +277,14 @@ async function renderProducts() {
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No products found</div><div>${products.length ? 'Try a different search or filter.' : 'Add your first product with the button below.'}</div></div>`;
 
-  document.querySelectorAll('#productList [data-pid]').forEach(el =>
-    el.addEventListener('click', () => openProductForm(Number(el.dataset.pid))));
+  document.querySelectorAll('#productList [data-pid]').forEach(el => {
+    el.addEventListener('click', () => openProductForm(Number(el.dataset.pid)));
+    const p = list.find(x => x.id === Number(el.dataset.pid));
+    attachLongPress(el, () => showConfirm(`Delete “${p.name}”?`, async () => {
+      await DB.delete('products', p.id);
+      snack('Product deleted'); render();
+    }));
+  });
 }
 
 /* ----- Inventory: incoming purchases (a pure expense log — no stock effect) ----- */
@@ -220,7 +292,7 @@ async function renderPurchases() {
   const purchases = await DB.getAll('purchases');
   purchases.sort((a, b) => b.receivedAt - a.receivedAt);
   $('#purchaseList').innerHTML = purchases.slice(0, 30).map(p => `
-    <div class="card">
+    <div class="card" data-puid="${p.id}">
       <div class="row">
         <div class="row-main">
           <div class="name">${esc(p.description)}</div>
@@ -229,6 +301,14 @@ async function renderPurchases() {
         <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
       </div>
     </div>`).join('') || '<div class="empty"><div class="title">No purchases yet</div><div>Money spent on stock or materials will appear here.</div></div>';
+
+  document.querySelectorAll('#purchaseList [data-puid]').forEach(el => {
+    const p = purchases.find(x => x.id === Number(el.dataset.puid));
+    attachLongPress(el, () => showConfirm(`Delete purchase “${p.description}” (${fmtMoney(p.amount)})?`, async () => {
+      await DB.delete('purchases', p.id);
+      snack('Purchase deleted'); render();
+    }));
+  });
 }
 
 $('#poReceive').addEventListener('click', async () => {
@@ -377,7 +457,7 @@ async function renderOrders() {
   list.sort((a, b) => b.createdAt - a.createdAt);
 
   $('#orderList').innerHTML = list.map(o => `
-    <div class="card">
+    <div class="card" data-oid="${o.id}">
       <div class="row">
         <div class="row-main">
           <div class="name">#${o.id} · ${esc(o.customerName)}</div>
@@ -391,6 +471,14 @@ async function renderOrders() {
       </div>
       ${railHTML(o)}
     </div>`).join('') || `<div class="empty"><div class="title">No orders found</div><div>${orders.length ? 'Try a different search or status filter.' : 'Create your first order with the button below.'}</div></div>`;
+
+  document.querySelectorAll('#orderList [data-oid]').forEach(el => {
+    const o = list.find(x => x.id === Number(el.dataset.oid));
+    attachLongPress(el, () => showConfirm(`Delete order #${o.id} (${o.customerName}, ${fmtMoney(o.total)})? Stock is not restored.`, async () => {
+      await DB.delete('orders', o.id);
+      snack(`Order #${o.id} deleted`); render();
+    }));
+  });
 
   document.querySelectorAll('[data-advance]').forEach(btn =>
     btn.addEventListener('click', async () => {
@@ -550,8 +638,14 @@ async function renderCustomers() {
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No customers found</div><div>${customers.length ? 'Try a different search.' : 'Customers are added here or when you create an order.'}</div></div>`;
 
-  document.querySelectorAll('#customerList [data-cid]').forEach(el =>
-    el.addEventListener('click', () => openCustomerDetail(Number(el.dataset.cid))));
+  document.querySelectorAll('#customerList [data-cid]').forEach(el => {
+    el.addEventListener('click', () => openCustomerDetail(Number(el.dataset.cid)));
+    const c = list.find(x => x.id === Number(el.dataset.cid));
+    attachLongPress(el, () => showConfirm(`Delete customer “${c.name}”? Their past orders stay in the order list.`, async () => {
+      await DB.delete('customers', c.id);
+      snack('Customer deleted'); render();
+    }));
+  });
 }
 
 async function openCustomerDetail(id) {
