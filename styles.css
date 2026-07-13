@@ -124,7 +124,7 @@ body {
 }
 
 button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; }
-input, select, textarea { font: inherit; }
+input, select, textarea { font: inherit; font-size: 16px; } /* ≥16px prevents mobile auto-zoom on focus */
 svg { fill: currentColor; }
 h1, h2, h3 { margin: 0; font-weight: 500; }
 
@@ -343,7 +343,7 @@ h1, h2, h3 { margin: 0; font-weight: 500; }
 }
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
-  max-height: 88vh; overflow-y: auto;
+  max-height: 88vh; max-height: 88dvh; overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--md-surface-container-low);
   border-radius: 24px 24px 0 0;
