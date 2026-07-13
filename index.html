@@ -58,17 +58,37 @@
             <input type="number" id="poAmount" min="0" step="1" inputmode="numeric" placeholder="100">
           </label>
           <label class="field">
+            <span>Category</span>
+            <select id="poCategory">
+              <option value="Materials">Materials</option>
+              <option value="Packaging">Packaging</option>
+              <option value="Equipment">Equipment</option>
+              <option value="Shipping">Shipping</option>
+              <option value="Other">Other</option>
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <label class="field">
             <span>Date</span>
             <input type="date" id="poDate">
           </label>
+          <label class="field">
+            <span>Supplier (optional)</span>
+            <input type="text" id="poSupplier" placeholder="e.g. Northline Supply">
+          </label>
         </div>
-        <label class="field">
-          <span>Supplier (optional)</span>
-          <input type="text" id="poSupplier" placeholder="e.g. Northline Supply">
-        </label>
         <button class="btn-filled" id="poReceive">Log purchase</button>
       </div>
       <h2 class="section-label">Recent purchases</h2>
+      <div class="chip-row" id="purchaseChips">
+        <button class="chip is-selected" data-pcat="all">All</button>
+        <button class="chip" data-pcat="Materials">Materials</button>
+        <button class="chip" data-pcat="Packaging">Packaging</button>
+        <button class="chip" data-pcat="Equipment">Equipment</button>
+        <button class="chip" data-pcat="Shipping">Shipping</button>
+        <button class="chip" data-pcat="Other">Other</button>
+      </div>
       <div id="purchaseList" class="card-list"></div>
     </div>
   </section>

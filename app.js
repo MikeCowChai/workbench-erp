@@ -53,6 +53,7 @@ const state = {
   view: 'dashboard',
   invTab: 'stock',
   stockFilter: 'all',
+  purchaseFilter: 'all',
   statusFilter: 'all',
   period: 'month', // dashboard stats: 'month' | 'quarter' | 'year'
   periodOffset: 0, // 0 = current period, -1 = previous, etc.
@@ -71,15 +72,31 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
 });
 $('#themeBtn').addEventListener('click', () => {
   const cur = localStorage.getItem('erp_theme') || 'auto';
+  const footer = localStorage.getItem('erp_receipt_footer') || '';
   openSheet(`
-    <h2>Theme</h2>
+    <h2>Settings</h2>
+    <h2 class="section-label" style="margin-top:0">Theme</h2>
     <div class="chip-row">
       <button class="chip ${cur === 'auto' ? 'is-selected' : ''}" data-theme-pick="auto">System (auto)</button>
       <button class="chip ${cur === 'light' ? 'is-selected' : ''}" data-theme-pick="light">Light</button>
       <button class="chip ${cur === 'dark' ? 'is-selected' : ''}" data-theme-pick="dark">Dark</button>
+    </div>
+    <h2 class="section-label">Receipt footer</h2>
+    <div class="form-card">
+      <label class="field"><span>Shown at the bottom of every shared receipt (name, bank account…)</span>
+        <textarea id="stFooter" rows="4" placeholder="Name:&#10;Your name&#10;Accountnumber SCB 1234567890">${esc(footer)}</textarea>
+      </label>
+      <button class="btn-filled" id="stSave">Save settings</button>
     </div>`);
   document.querySelectorAll('[data-theme-pick]').forEach(c =>
-    c.addEventListener('click', () => { applyTheme(c.dataset.themePick); closeSheet(); }));
+    c.addEventListener('click', () => {
+      applyTheme(c.dataset.themePick);
+      document.querySelectorAll('[data-theme-pick]').forEach(x => x.classList.toggle('is-selected', x === c));
+    }));
+  $('#stSave').onclick = () => {
+    localStorage.setItem('erp_receipt_footer', $('#stFooter').value);
+    closeSheet(); snack('Settings saved');
+  };
 });
 applyTheme(localStorage.getItem('erp_theme') || 'auto');
 
@@ -404,6 +421,25 @@ async function renderDashboard() {
         <span><span class="legend-dot cost"></span>Costs</span>
       </div>
     </div>
+    ${costs > 0 ? (() => {
+      const byCat = {};
+      periodPurchases.forEach(pu => {
+        const c = pu.category || 'Other';
+        byCat[c] = (byCat[c] || 0) + (pu.amount || 0);
+      });
+      const rows = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+      const maxCat = rows[0][1];
+      return `
+      <h2 class="section-label">Costs by category · ${periodLabel}</h2>
+      <div class="card">
+        ${rows.map(([c, amt]) => `
+          <div class="tc-row">
+            <div class="tc-name">${c}</div>
+            <div class="tc-track"><div class="tc-fill cost" style="width:${Math.max(4, Math.round(amt / maxCat * 100))}%"></div></div>
+            <div class="tc-amount">${fmtMoney(amt)}</div>
+          </div>`).join('')}
+      </div>`;
+    })() : ''}
     <h2 class="section-label">Recent activity</h2>
     <div class="card">
       ${events.slice(0, 8).map(e => `
@@ -496,19 +532,22 @@ async function renderProducts() {
 async function renderPurchases() {
   const purchases = await DB.getAll('purchases');
   purchases.sort((a, b) => b.receivedAt - a.receivedAt);
-  $('#purchaseList').innerHTML = purchases.slice(0, 30).map(p => `
+  const cat = p => p.category || 'Other';
+  const list = state.purchaseFilter === 'all' ? purchases : purchases.filter(p => cat(p) === state.purchaseFilter);
+
+  $('#purchaseList').innerHTML = list.slice(0, 50).map(p => `
     <div class="swipe" data-puid="${p.id}">
       ${SWIPE_PANES}
       <div class="card">
         <div class="row">
           <div class="row-main">
             <div class="name">${esc(p.description)}</div>
-            <div class="sub">${p.supplier ? esc(p.supplier) + ' · ' : ''}${fmtDate(p.receivedAt)}</div>
+            <div class="sub">${cat(p)}${p.supplier ? ' · ' + esc(p.supplier) : ''} · ${fmtDate(p.receivedAt)}</div>
           </div>
           <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
         </div>
       </div>
-    </div>`).join('') || '<div class="empty"><div class="title">No purchases yet</div><div>Money spent on stock or materials will appear here.</div></div>';
+    </div>`).join('') || `<div class="empty"><div class="title">No purchases found</div><div>${purchases.length ? 'Try a different category filter.' : 'Money spent on stock or materials will appear here.'}</div></div>`;
 
   document.querySelectorAll('#purchaseList .swipe[data-puid]').forEach(wrap => {
     const p = purchases.find(x => x.id === Number(wrap.dataset.puid));
@@ -524,6 +563,8 @@ async function renderPurchases() {
   if (!$('#poDate').value) $('#poDate').value = tsToDateInput(Date.now());
 }
 
+const CATEGORY_OPTIONS = ['Materials', 'Packaging', 'Equipment', 'Shipping', 'Other'];
+
 /* Edit an existing expense entry. */
 function openPurchaseForm(p) {
   openSheet(`
@@ -532,9 +573,14 @@ function openPurchaseForm(p) {
       <label class="field"><span>What did you buy</span><input id="peDescription" value="${esc(p.description)}"></label>
       <div class="field-row">
         <label class="field"><span>Amount spent (฿)</span><input id="peAmount" type="number" min="0" step="1" inputmode="numeric" value="${p.amount}"></label>
-        <label class="field"><span>Date</span><input type="date" id="peDate" value="${tsToDateInput(p.receivedAt)}"></label>
+        <label class="field"><span>Category</span>
+          <select id="peCategory">${CATEGORY_OPTIONS.map(c => `<option value="${c}" ${(p.category || 'Other') === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
+        </label>
       </div>
-      <label class="field"><span>Supplier (optional)</span><input id="peSupplier" value="${esc(p.supplier || '')}"></label>
+      <div class="field-row">
+        <label class="field"><span>Date</span><input type="date" id="peDate" value="${tsToDateInput(p.receivedAt)}"></label>
+        <label class="field"><span>Supplier (optional)</span><input id="peSupplier" value="${esc(p.supplier || '')}"></label>
+      </div>
       <button class="btn-filled" id="peSave">Save changes</button>
     </div>`);
   $('#peSave').onclick = async () => {
@@ -544,7 +590,7 @@ function openPurchaseForm(p) {
     if (!description) return snack('Enter what you bought');
     if (!(amount > 0)) return snack('Enter an amount greater than 0');
     if (!ts) return snack('Pick a date');
-    await DB.put('purchases', { ...p, description, amount, supplier: $('#peSupplier').value.trim(), receivedAt: ts });
+    await DB.put('purchases', { ...p, description, amount, category: $('#peCategory').value, supplier: $('#peSupplier').value.trim(), receivedAt: ts });
     closeSheet(); snack('Purchase updated'); render();
   };
 }
@@ -559,6 +605,7 @@ $('#poReceive').addEventListener('click', async () => {
 
   await DB.add('purchases', {
     description, amount,
+    category: $('#poCategory').value,
     supplier: $('#poSupplier').value.trim(),
     receivedAt: ts
   });
@@ -609,6 +656,11 @@ async function openProductForm(id) {
           <option value="weight" ${unitType === 'weight' ? 'selected' : ''}>Weight (grams / kilograms)</option>
         </select>
       </label>
+      <div id="pfPackWrap">${unitType === 'weight' ? `
+        <label class="field"><span>Pack size on receipt (g) — e.g. 500 shows “(500g ฿…)”</span>
+          <input id="pfPack" type="number" min="1" inputmode="numeric" value="${p.packG || 1000}">
+        </label>` : ''}
+      </div>
       <label class="field"><span>Stock handling</span>
         <select id="pfStockMode">
           <option value="tracked" ${stockMode(p) === 'tracked' ? 'selected' : ''}>Track stock</option>
@@ -624,6 +676,11 @@ async function openProductForm(id) {
   function redraw() {
     $('#pfStockFields').innerHTML = stockFieldsHTML($('#pfUnitType').value, $('#pfStockMode').value === 'tracked');
     $('#pfPriceLabel').textContent = $('#pfUnitType').value === 'weight' ? 'Price per kg (฿)' : 'Unit price (฿)';
+    const curPack = $('#pfPack') ? Number($('#pfPack').value) || 1000 : (p.packG || 1000);
+    $('#pfPackWrap').innerHTML = $('#pfUnitType').value === 'weight' ? `
+      <label class="field"><span>Pack size on receipt (g) — e.g. 500 shows “(500g ฿…)”</span>
+        <input id="pfPack" type="number" min="1" inputmode="numeric" value="${curPack}">
+      </label>` : '';
     bindWeightUnitToggle();
   }
   function bindWeightUnitToggle() {
@@ -668,6 +725,7 @@ async function openProductForm(id) {
       ...(id ? { id } : {}),
       name, sku: $('#pfSku').value.trim(), price, trackStock, stockMode: mode,
       unit: finalUnitType, stock, lowStock,
+      packG: finalUnitType === 'weight' ? Math.max(1, Number($('#pfPack') && $('#pfPack').value) || 1000) : undefined,
       isDelivery: p.isDelivery || false
     };
     const savedId = await DB.put('products', record);
@@ -758,16 +816,84 @@ async function renderOrders() {
     }));
 }
 
-/* ----- Order options (long-press) ----- */
+/* ----- Receipt sharing ----- */
+/* Format (per the owner's spec):
+   1x Chili Sticks (500g ฿995) = 1850g ฿3.680     ← weight item, pack reference
+   2x Biltong Beef Fatty 500g ฿1.590              ← pieces item, line total
+   1x Shipping free                                ← zero-priced line
+   Discount 12.5%
+   Total (฿11.420-12.5%) = ฿9.990
+   + configurable payment footer                                        */
+function buildReceipt(order, products) {
+  const fmtN = n => n.toLocaleString('de-DE'); // 3.680-style thousands separator
+  const itemLines = order.items.map(i => {
+    const lt = i.lineTotal !== undefined ? i.lineTotal : i.qty * i.unitPrice;
+    if (i.unitType === 'weight') {
+      const p = products.find(x => x.id === i.productId);
+      const pack = (p && p.packG) || 1000;
+      const packPrice = Math.round(i.unitPrice * pack / 1000);
+      return `1x ${i.name} (${pack}g ฿${fmtN(packPrice)}) = ${i.qty}g ฿${fmtN(lt)}`;
+    }
+    return `${i.qty}x ${i.name}${lt === 0 ? ' free' : ' ฿' + fmtN(lt)}`;
+  });
+
+  const parts = [itemLines.join('\n')];
+  if (order.discountPct > 0) parts.push(`\nDiscount ${order.discountPct}%`);
+  const sub = order.subtotal !== undefined ? order.subtotal : order.total;
+  parts.push('\n' + (order.discountPct > 0
+    ? `Total (฿${fmtN(sub)}-${order.discountPct}%) = ฿${fmtN(order.total)}`
+    : `Total = ฿${fmtN(order.total)}`));
+
+  const footer = localStorage.getItem('erp_receipt_footer');
+  if (footer && footer.trim()) parts.push('\n' + footer.trim());
+  return parts.join('\n');
+}
+
+async function shareReceipt(o) {
+  const products = await DB.getAll('products');
+  const text = buildReceipt(o, products);
+  if (navigator.share) {
+    try { await navigator.share({ text }); } catch (e) { /* user cancelled */ }
+  } else if (navigator.clipboard) {
+    await navigator.clipboard.writeText(text);
+    snack('Receipt copied to clipboard');
+  } else {
+    openSheet(`<h2>Receipt</h2><pre style="white-space:pre-wrap;font-family:inherit">${esc(text)}</pre>`);
+  }
+}
+
+/* ----- Order options (long-press / swipe-edit) ----- */
 function openOrderOptions(o) {
   const hasWeight = o.items.some(i => i.unitType === 'weight');
   openSheet(`
     <h2>Order #${o.id} · ${esc(o.customerName)}</h2>
     <div class="form-card">
+      <button class="btn-tonal" id="ooShare">Share receipt</button>
+      <button class="btn-tonal" id="ooDate">Change order date</button>
       <button class="btn-tonal" id="ooNumber">Change order number</button>
       ${hasWeight ? '<button class="btn-tonal" id="ooWeights">Adjust sold weights</button>' : ''}
       <button class="btn-text danger" id="ooDelete">Delete order</button>
     </div>`);
+
+  $('#ooShare').onclick = () => shareReceipt(o);
+
+  $('#ooDate').onclick = () => {
+    openSheet(`
+      <h2>Change order date</h2>
+      <div class="form-card">
+        <label class="field"><span>Order date for #${o.id}</span>
+          <input type="date" id="odDate" value="${tsToDateInput(o.createdAt)}">
+        </label>
+        <button class="btn-filled" id="odSave">Save</button>
+      </div>`);
+    $('#odSave').onclick = async () => {
+      const ts = dateInputToTs($('#odDate').value);
+      if (!ts) return snack('Pick a date');
+      o.createdAt = ts;
+      await DB.put('orders', o);
+      closeSheet(); snack(`Order #${o.id} moved to ${fmtDate(ts)}`); render();
+    };
+  };
 
   $('#ooNumber').onclick = () => {
     openSheet(`
@@ -1072,6 +1198,7 @@ async function openCustomerDetail(id) {
     <h2>${esc(c.name)}</h2>
     <div class="sub" style="color:var(--md-on-surface-variant);margin:-8px 0 2px">${esc(c.phone || 'No phone on file')}${c.email ? ' · ' + esc(c.email) : ''}</div>
     <div class="sub" style="color:var(--md-on-surface-variant);margin:0 0 16px">${esc(c.address || 'No address on file')}</div>
+    ${c.notes ? `<div class="card" style="margin-bottom:16px;background:var(--md-secondary-container);color:var(--md-on-secondary-container);font-size:14px">${esc(c.notes)}</div>` : ''}
     <div class="stat-grid">
       <div class="stat-card"><div class="label">Total spent</div><div class="value" style="font-size:24px">${fmtMoney(spent)}</div></div>
       <div class="stat-card"><div class="label">Orders</div><div class="value" style="font-size:24px">${theirs.length}</div></div>
@@ -1096,7 +1223,7 @@ async function openCustomerDetail(id) {
 }
 
 async function openCustomerForm(id) {
-  const c = id ? await DB.get('customers', id) : { name: '', phone: '', email: '', address: '' };
+  const c = id ? await DB.get('customers', id) : { name: '', phone: '', email: '', address: '', notes: '' };
   openSheet(`
     <h2>${id ? 'Edit customer' : 'New customer'}</h2>
     <div class="form-card">
@@ -1104,6 +1231,7 @@ async function openCustomerForm(id) {
       <label class="field"><span>Phone number</span><input id="cfPhone" type="tel" inputmode="tel" value="${esc(c.phone || '')}" placeholder="08x-xxx-xxxx"></label>
       <label class="field"><span>Email (optional)</span><input id="cfEmail" type="email" inputmode="email" value="${esc(c.email || '')}" placeholder="name@example.com"></label>
       <label class="field"><span>Address</span><input id="cfAddress" value="${esc(c.address || '')}"></label>
+      <label class="field"><span>Notes (optional)</span><textarea id="cfNotes" rows="3" placeholder="e.g. prefers extra spicy, always ships to office">${esc(c.notes || '')}</textarea></label>
       <button class="btn-filled" id="cfSave">${id ? 'Save changes' : 'Add customer'}</button>
     </div>`);
   $('#cfSave').onclick = async () => {
@@ -1115,6 +1243,7 @@ async function openCustomerForm(id) {
       ...(id ? { id } : {}), name, phone,
       email: $('#cfEmail').value.trim(),
       address: $('#cfAddress').value.trim(),
+      notes: $('#cfNotes').value.trim(),
       createdAt: c.createdAt || Date.now()
     });
     closeSheet(); snack(id ? 'Customer saved' : 'Customer added'); render();
@@ -1132,6 +1261,13 @@ function syncStockChips() {
 }
 document.querySelectorAll('[data-stockfilter]').forEach(chip =>
   chip.addEventListener('click', () => { state.stockFilter = chip.dataset.stockfilter; syncStockChips(); renderProducts(); }));
+
+document.querySelectorAll('[data-pcat]').forEach(chip =>
+  chip.addEventListener('click', () => {
+    state.purchaseFilter = chip.dataset.pcat;
+    document.querySelectorAll('[data-pcat]').forEach(c => c.classList.toggle('is-selected', c === chip));
+    renderPurchases();
+  }));
 
 document.querySelectorAll('[data-status]').forEach(chip =>
   chip.addEventListener('click', () => {
