@@ -131,10 +131,15 @@ document.querySelectorAll('.nav-item').forEach(b =>
 function openSheet(html) {
   $('#sheetContent').innerHTML = html;
   const sheet = $('#sheet');
-  sheet.style.transition = '';
+  sheet.style.transition = 'none';
   sheet.style.transform = '';
   sheet.hidden = false;
   sheet.scrollTop = 0; // a previous long sheet may have left it scrolled down
+  // Force a layout pass so the browser anchors the fixed sheet to the
+  // viewport (not the page) before the entrance animation runs. Without
+  // this, opening straight from a swipe gesture could mis-position it.
+  void sheet.offsetHeight;
+  sheet.style.transition = '';
   $('#scrim').hidden = false;
 }
 function closeSheet() {
@@ -261,10 +266,18 @@ function attachSwipe(wrap, { onEdit, onDelete }) {
     if (!wasSwipe) return;
     actionFired = true;
     setTimeout(() => { actionFired = false; }, 400);
-    // Open the follow-up UI a beat after the touch gesture has fully ended,
-    // so the sheet's entrance animation isn't disturbed by the gesture.
-    if (t < -80) setTimeout(onDelete, 30);
-    else if (t > 80) setTimeout(onEdit, 30);
+    // Let the swipe animation finish and the browser exit its touch-gesture
+    // state BEFORE opening a fixed-position sheet. Clearing the inline
+    // transform/transition first prevents the sheet from inheriting the
+    // card's animation frame (which mis-anchored it to the page, not the
+    // viewport). Two rAFs + a short delay reliably clears it on Android.
+    const fire = t < -80 ? onDelete : t > 80 ? onEdit : null;
+    if (!fire) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      card.style.transition = '';
+      card.style.transform = '';
+      setTimeout(fire, 60);
+    }));
   };
   card.addEventListener('touchend', end);
   card.addEventListener('touchcancel', end);

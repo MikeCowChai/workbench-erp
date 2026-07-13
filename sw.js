@@ -1,6 +1,6 @@
 /* Service worker — caches the entire app shell so Workbench ERP
    runs with zero network. Bump CACHE version when files change. */
-const CACHE = 'workbench-erp-v15';
+const CACHE = 'workbench-erp-v16';
 const SHELL = [
   './',
   './index.html',
