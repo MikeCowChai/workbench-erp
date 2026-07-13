@@ -41,8 +41,33 @@ const state = {
   stockFilter: 'all',
   statusFilter: 'all',
   period: 'month', // dashboard stats: 'month' | 'quarter' | 'year'
+  periodOffset: 0, // 0 = current period, -1 = previous, etc.
   search: { product: '', order: '', customer: '' }
 };
+
+/* ---------------- Theme (auto / light / dark) ---------------- */
+function applyTheme(pref) {
+  localStorage.setItem('erp_theme', pref);
+  document.documentElement.dataset.theme = pref === 'auto' ? '' : pref;
+  const dark = pref === 'dark' || (pref === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.querySelector('meta[name="theme-color"]').content = dark ? '#121318' : '#FBF8FF';
+}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if ((localStorage.getItem('erp_theme') || 'auto') === 'auto') applyTheme('auto');
+});
+$('#themeBtn').addEventListener('click', () => {
+  const cur = localStorage.getItem('erp_theme') || 'auto';
+  openSheet(`
+    <h2>Theme</h2>
+    <div class="chip-row">
+      <button class="chip ${cur === 'auto' ? 'is-selected' : ''}" data-theme-pick="auto">System (auto)</button>
+      <button class="chip ${cur === 'light' ? 'is-selected' : ''}" data-theme-pick="light">Light</button>
+      <button class="chip ${cur === 'dark' ? 'is-selected' : ''}" data-theme-pick="dark">Dark</button>
+    </div>`);
+  document.querySelectorAll('[data-theme-pick]').forEach(c =>
+    c.addEventListener('click', () => { applyTheme(c.dataset.themePick); closeSheet(); }));
+});
+applyTheme(localStorage.getItem('erp_theme') || 'auto');
 
 /* ---------------- Navigation ---------------- */
 const VIEW_TITLES = { dashboard: 'Dashboard', inventory: 'Inventory', orders: 'Orders', customers: 'Customers' };
@@ -163,6 +188,57 @@ function showConfirm(message, onConfirm) {
   $('#confirmOk').onclick = () => { close(); onConfirm(); };
 }
 
+/* Swipeable card: drag right → edit (left pane), drag left → delete (right
+   pane). Locks to horizontal or vertical after the first ~12px so list
+   scrolling keeps working; a completed swipe swallows the follow-up click. */
+function attachSwipe(wrap, { onEdit, onDelete }) {
+  const card = wrap.querySelector('.card');
+  let sx = 0, sy = 0, dx = 0, mode = null, actionFired = false;
+
+  card.addEventListener('touchstart', e => {
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+    dx = 0; mode = null;
+    card.style.transition = 'none';
+  }, { passive: true });
+
+  card.addEventListener('touchmove', e => {
+    const x = e.touches[0].clientX - sx, y = e.touches[0].clientY - sy;
+    if (mode === null) {
+      if (Math.abs(x) > 12 && Math.abs(x) > Math.abs(y) * 1.5) mode = 'swipe';
+      else if (Math.abs(y) > 12) mode = 'scroll';
+      else return;
+    }
+    if (mode !== 'swipe') return;
+    e.preventDefault();
+    dx = x;
+    card.style.transform = `translateX(${dx}px)`;
+    wrap.classList.toggle('show-left', dx > 0);
+    wrap.classList.toggle('show-right', dx < 0);
+  }, { passive: false });
+
+  const end = () => {
+    const wasSwipe = mode === 'swipe';
+    const t = dx;
+    mode = null; dx = 0;
+    card.style.transition = 'transform .18s ease';
+    card.style.transform = '';
+    setTimeout(() => wrap.classList.remove('show-left', 'show-right'), 180);
+    if (!wasSwipe) return;
+    actionFired = true;
+    setTimeout(() => { actionFired = false; }, 400);
+    if (t < -80) onDelete();
+    else if (t > 80) onEdit();
+  };
+  card.addEventListener('touchend', end);
+  card.addEventListener('touchcancel', end);
+  card.addEventListener('click', e => {
+    if (actionFired) { e.stopImmediatePropagation(); e.preventDefault(); }
+  }, true);
+}
+const SWIPE_PANES = `
+  <div class="swipe-bg left"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z"/></svg>Edit</div>
+  <div class="swipe-bg right">Delete<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z"/></svg></div>`;
+
 let snackTimer = null;
 function snack(msg) {
   const el = $('#snackbar');
@@ -187,23 +263,41 @@ async function renderDashboard() {
   ]);
 
   const now = new Date();
-  const periodStart = {
-    month:   new Date(now.getFullYear(), now.getMonth(), 1),
-    quarter: new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1),
-    year:    new Date(now.getFullYear(), 0, 1)
-  }[state.period].getTime();
-  const periodLabel = {
-    month:   now.toLocaleDateString(undefined, { month: 'long' }),
-    quarter: 'Q' + (Math.floor(now.getMonth() / 3) + 1) + ' ' + now.getFullYear(),
-    year:    String(now.getFullYear())
-  }[state.period];
+  const off = state.periodOffset;
+  let pStart, pEnd, periodLabel;
+  if (state.period === 'month') {
+    pStart = new Date(now.getFullYear(), now.getMonth() + off, 1);
+    pEnd = new Date(now.getFullYear(), now.getMonth() + off + 1, 1);
+    periodLabel = pStart.toLocaleDateString(undefined, { month: 'long', ...(pStart.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}) });
+  } else if (state.period === 'quarter') {
+    const qBase = Math.floor(now.getMonth() / 3) * 3 + off * 3;
+    pStart = new Date(now.getFullYear(), qBase, 1);
+    pEnd = new Date(now.getFullYear(), qBase + 3, 1);
+    periodLabel = 'Q' + (Math.floor(pStart.getMonth() / 3) + 1) + ' ' + pStart.getFullYear();
+  } else {
+    pStart = new Date(now.getFullYear() + off, 0, 1);
+    pEnd = new Date(now.getFullYear() + off + 1, 0, 1);
+    periodLabel = String(pStart.getFullYear());
+  }
+  const periodStart = pStart.getTime(), periodEnd = pEnd.getTime();
 
   // Payment is taken before shipping, so every order placed counts as revenue.
-  const periodOrders = orders.filter(o => o.createdAt >= periodStart);
+  const periodOrders = orders.filter(o => o.createdAt >= periodStart && o.createdAt < periodEnd);
   const revenue = periodOrders.reduce((s, o) => s + o.total, 0);
-  const periodPurchases = purchases.filter(pu => pu.receivedAt >= periodStart);
+  const periodPurchases = purchases.filter(pu => pu.receivedAt >= periodStart && pu.receivedAt < periodEnd);
   const costs = periodPurchases.reduce((s, pu) => s + (pu.amount || 0), 0);
   const profit = revenue - costs;
+
+  // Month-on-month revenue, last 6 months (independent of the selector).
+  const monthly = [...Array(6)].map((_, k) => {
+    const s = new Date(now.getFullYear(), now.getMonth() - 5 + k, 1);
+    const e = new Date(now.getFullYear(), now.getMonth() - 4 + k, 1);
+    const rev = orders.filter(o => o.createdAt >= s.getTime() && o.createdAt < e.getTime())
+      .reduce((sum, o) => sum + o.total, 0);
+    return { label: s.toLocaleDateString(undefined, { month: 'short' }), rev, current: k === 5 };
+  });
+  const maxRev = Math.max(1, ...monthly.map(m => m.rev));
+  const fmtCompact = n => n >= 10000 ? '฿' + Math.round(n / 1000) + 'k' : n >= 1000 ? '฿' + (n / 1000).toFixed(1) + 'k' : '฿' + n;
 
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
   const readyToShip = orders.filter(o => o.status === STATUSES[1]).length;
@@ -236,6 +330,11 @@ async function renderDashboard() {
       <button class="chip ${state.period === 'month' ? 'is-selected' : ''}" data-period="month">Month</button>
       <button class="chip ${state.period === 'quarter' ? 'is-selected' : ''}" data-period="quarter">Quarter</button>
       <button class="chip ${state.period === 'year' ? 'is-selected' : ''}" data-period="year">Year</button>
+    </div>
+    <div class="period-nav">
+      <button id="periodPrev" title="Previous">‹</button>
+      <span class="label">${periodLabel}</span>
+      <button id="periodNext" title="Next" ${off >= 0 ? 'disabled' : ''}>›</button>
     </div>
     <div class="stat-grid">
       <div class="stat-card hero">
@@ -273,6 +372,17 @@ async function renderDashboard() {
         <div class="hint">${lowStock} low · ${outOfStock} out of stock — tap to review</div>
       </div>` : ''}
     </div>
+    <h2 class="section-label">Revenue · last 6 months</h2>
+    <div class="card">
+      <div class="chart">
+        ${monthly.map(m => `
+          <div class="chart-col ${m.current ? 'is-current' : ''}">
+            <span class="chart-val">${m.rev ? fmtCompact(m.rev) : ''}</span>
+            <div class="chart-bar" style="height:${Math.round(m.rev / maxRev * 100)}%"></div>
+            <span class="chart-label">${m.label}</span>
+          </div>`).join('')}
+      </div>
+    </div>
     <h2 class="section-label">Recent activity</h2>
     <div class="card">
       ${events.slice(0, 8).map(e => `
@@ -296,7 +406,10 @@ async function renderDashboard() {
   const lowCard = $('#lowStockCard');
   if (lowCard) lowCard.onclick = () => { state.stockFilter = 'low'; switchView('inventory'); syncStockChips(); };
   document.querySelectorAll('#periodChips [data-period]').forEach(chip =>
-    chip.addEventListener('click', () => { state.period = chip.dataset.period; renderDashboard(); }));
+    chip.addEventListener('click', () => { state.period = chip.dataset.period; state.periodOffset = 0; renderDashboard(); }));
+  const prev = $('#periodPrev'), next = $('#periodNext');
+  if (prev) prev.onclick = () => { state.periodOffset--; renderDashboard(); };
+  if (next) next.onclick = () => { if (state.periodOffset < 0) { state.periodOffset++; renderDashboard(); } };
 }
 
 /* ----- Inventory: products ----- */
@@ -540,7 +653,9 @@ async function renderOrders() {
   $('#orderList').innerHTML = list.map(o => {
     const waiting = o.items.filter(i => i.pendingQty > 0);
     return `
-    <div class="card" data-oid="${o.id}">
+    <div class="swipe" data-oid="${o.id}">
+      ${SWIPE_PANES}
+      <div class="card">
       <div class="row">
         <div class="row-main">
           <div class="name">#${o.id} · ${esc(o.customerName)}</div>
@@ -555,12 +670,18 @@ async function renderOrders() {
         </div>
       </div>
       ${railHTML(o)}
+      </div>
     </div>`;
   }).join('') || `<div class="empty"><div class="title">No orders found</div><div>${orders.length ? 'Try a different search or status filter.' : 'Create your first order with the button below.'}</div></div>`;
 
-  document.querySelectorAll('#orderList [data-oid]').forEach(el => {
-    const o = list.find(x => x.id === Number(el.dataset.oid));
-    attachLongPress(el, () => openOrderOptions(o));
+  document.querySelectorAll('#orderList .swipe[data-oid]').forEach(wrap => {
+    const o = list.find(x => x.id === Number(wrap.dataset.oid));
+    const confirmDelete = () => showConfirm(`Delete order #${o.id} (${o.customerName}, ${fmtMoney(o.total)})? Stock is not restored.`, async () => {
+      await DB.delete('orders', o.id);
+      snack(`Order #${o.id} deleted`); render();
+    });
+    attachSwipe(wrap, { onEdit: () => openOrderOptions(o), onDelete: confirmDelete });
+    attachLongPress(wrap.querySelector('.card'), () => openOrderOptions(o));
   });
 
   document.querySelectorAll('[data-advance]').forEach(btn =>
@@ -831,35 +952,57 @@ async function openOrderForm() {
 async function renderCustomers() {
   const [customers, orders] = await Promise.all([DB.getAll('customers'), DB.getAll('orders')]);
   const q = state.search.customer.toLowerCase();
-  const list = customers
+  // Spending overview: top 5 customers as horizontal bars (clearer than a
+  // pie on a narrow screen), based on all customers, not the search filter.
+  const all = customers.map(c => {
+    const theirOrders = orders.filter(o => o.customerId === c.id);
+    return { ...c, orderCount: theirOrders.length, spent: theirOrders.reduce((s, o) => s + o.total, 0) };
+  });
+  const top = [...all].sort((a, b) => b.spent - a.spent).filter(c => c.spent > 0).slice(0, 5);
+  const grand = all.reduce((s, c) => s + c.spent, 0);
+  $('#customerChart').innerHTML = top.length >= 2 ? `
+    <div class="card" style="margin-bottom:12px">
+      <h2 class="card-title" style="margin-bottom:4px">Top customers</h2>
+      ${top.map(c => `
+        <div class="tc-row">
+          <div class="tc-name">${esc(c.name)}</div>
+          <div class="tc-track"><div class="tc-fill" style="width:${Math.max(4, Math.round(c.spent / top[0].spent * 100))}%"></div></div>
+          <div class="tc-amount">${fmtMoney(c.spent)}</div>
+        </div>`).join('')}
+      <div class="sub" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:6px">${Math.round(top.reduce((s, c) => s + c.spent, 0) / grand * 100)}% of all revenue comes from these ${top.length}</div>
+    </div>` : '';
+
+  const list = all
     .filter(c => c.name.toLowerCase().includes(q) || (c.address || '').toLowerCase().includes(q) || (c.phone || '').includes(q))
-    .map(c => {
-      const theirOrders = orders.filter(o => o.customerId === c.id);
-      return { ...c, orderCount: theirOrders.length, spent: theirOrders.reduce((s, o) => s + o.total, 0) };
-    })
     .sort((a, b) => b.spent - a.spent);
 
   $('#customerList').innerHTML = list.map(c => `
-    <div class="card is-tappable" data-cid="${c.id}" role="button" tabindex="0">
-      <div class="row">
-        <div class="row-main">
-          <div class="name">${esc(c.name)}</div>
-          <div class="sub">${esc(c.phone || 'No phone on file')}</div>
-        </div>
-        <div class="row-end">
-          <div class="big">${fmtMoney(c.spent)}</div>
-          <div class="sub">${c.orderCount} order${c.orderCount === 1 ? '' : 's'}</div>
+    <div class="swipe" data-cid="${c.id}">
+      ${SWIPE_PANES}
+      <div class="card is-tappable" role="button" tabindex="0">
+        <div class="row">
+          <div class="row-main">
+            <div class="name">${esc(c.name)}</div>
+            <div class="sub">${esc(c.phone || 'No phone on file')}</div>
+          </div>
+          <div class="row-end">
+            <div class="big">${fmtMoney(c.spent)}</div>
+            <div class="sub">${c.orderCount} order${c.orderCount === 1 ? '' : 's'}</div>
+          </div>
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No customers found</div><div>${customers.length ? 'Try a different search.' : 'Customers are added here or when you create an order.'}</div></div>`;
 
-  document.querySelectorAll('#customerList [data-cid]').forEach(el => {
-    el.addEventListener('click', () => openCustomerDetail(Number(el.dataset.cid)));
-    const c = list.find(x => x.id === Number(el.dataset.cid));
-    attachLongPress(el, () => showConfirm(`Delete customer “${c.name}”? Their past orders stay in the order list.`, async () => {
+  document.querySelectorAll('#customerList .swipe[data-cid]').forEach(wrap => {
+    const c = list.find(x => x.id === Number(wrap.dataset.cid));
+    const card = wrap.querySelector('.card');
+    card.addEventListener('click', () => openCustomerDetail(c.id));
+    const confirmDelete = () => showConfirm(`Delete customer “${c.name}”? Their past orders stay in the order list.`, async () => {
       await DB.delete('customers', c.id);
       snack('Customer deleted'); render();
-    }));
+    });
+    attachSwipe(wrap, { onEdit: () => openCustomerForm(c.id), onDelete: confirmDelete });
+    attachLongPress(card, () => confirmDelete());
   });
 }
 

@@ -15,7 +15,12 @@
 
 <header class="top-bar">
   <h1 id="viewTitle">Dashboard</h1>
-  <span class="top-bar-meta" id="topBarMeta"></span>
+  <div class="top-bar-end">
+    <span class="top-bar-meta" id="topBarMeta"></span>
+    <button class="icon-btn" id="themeBtn" title="Theme">
+      <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-5.4-5.4 5.39 5.39 0 0 1 2.26-4.4c-.44-.06-.9-.1-1.36-.1"/></svg>
+    </button>
+  </div>
 </header>
 
 <main id="main">
@@ -82,6 +87,7 @@
 
   <!-- Customers -->
   <section class="view" id="view-customers" hidden>
+    <div id="customerChart"></div>
     <div class="search-field">
       <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14"/></svg>
       <input type="search" id="customerSearch" placeholder="Search customers" autocomplete="off">

@@ -1,33 +1,38 @@
 /* ============================================================
    Workbench ERP — Material Design 3 tokens (hand-rolled, offline)
-   Palette: petrol green primary / amber tertiary for stock alerts
+   Palette: indigo primary, violet-tinted neutrals.
+   Amber = warnings only, red = errors only.
+   Theme: light (default) / dark / follows system when data-theme unset.
    ============================================================ */
 :root {
-  --md-primary: #006A60;
+  --md-primary: #4355B9;
   --md-on-primary: #FFFFFF;
-  --md-primary-container: #9CF2E3;
-  --md-on-primary-container: #00201C;
+  --md-primary-container: #DDE1FF;
+  --md-on-primary-container: #00105C;
 
-  --md-secondary: #4A635E;
-  --md-secondary-container: #CCE8E1;
-  --md-on-secondary-container: #06201B;
+  --md-secondary: #5B5D72;
+  --md-secondary-container: #E0E1F9;
+  --md-on-secondary-container: #181A2C;
 
-  --md-tertiary: #7C5800;
-  --md-tertiary-container: #FFDEA6;
-  --md-on-tertiary-container: #271900;
+  --md-tertiary: #805600;
+  --md-tertiary-container: #FFDDB1;
+  --md-on-tertiary-container: #291800;
 
   --md-error: #BA1A1A;
   --md-error-container: #FFDAD6;
   --md-on-error-container: #410002;
 
-  --md-surface: #F5FAF7;
-  --md-surface-container-low: #EFF5F1;
-  --md-surface-container: #E9EFEC;
-  --md-surface-container-high: #E3EAE6;
-  --md-on-surface: #171D1B;
-  --md-on-surface-variant: #3F4946;
-  --md-outline: #6F7977;
-  --md-outline-variant: #BEC9C5;
+  --md-surface: #FBF8FF;
+  --md-surface-container-low: #F5F2FA;
+  --md-surface-container: #EFEDF6;
+  --md-surface-container-high: #E9E7F0;
+  --md-on-surface: #1B1B21;
+  --md-on-surface-variant: #46464F;
+  --md-outline: #777680;
+  --md-outline-variant: #C7C5D0;
+
+  --md-inverse-surface: #303036;
+  --md-inverse-on-surface: #F2F0F7;
 
   --md-elev-1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
   --md-elev-3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.30);
@@ -36,6 +41,72 @@
   --radius-m: 12px;
   --radius-l: 16px;
   --radius-full: 999px;
+}
+
+/* Dark tokens (forced via data-theme="dark") */
+:root[data-theme="dark"] {
+  --md-primary: #B9C3FF;
+  --md-on-primary: #08218A;
+  --md-primary-container: #2A3CA0;
+  --md-on-primary-container: #DDE1FF;
+
+  --md-secondary: #C4C5DD;
+  --md-secondary-container: #434659;
+  --md-on-secondary-container: #E0E1F9;
+
+  --md-tertiary: #FABD49;
+  --md-tertiary-container: #614000;
+  --md-on-tertiary-container: #FFDDB1;
+
+  --md-error: #FFB4AB;
+  --md-error-container: #93000A;
+  --md-on-error-container: #FFDAD6;
+
+  --md-surface: #121318;
+  --md-surface-container-low: #1A1B21;
+  --md-surface-container: #1E1F25;
+  --md-surface-container-high: #282930;
+  --md-on-surface: #E4E1E9;
+  --md-on-surface-variant: #C7C5D0;
+  --md-outline: #91909A;
+  --md-outline-variant: #46464F;
+
+  --md-inverse-surface: #E4E1E9;
+  --md-inverse-on-surface: #303036;
+}
+
+/* Dark tokens (system preference, unless light is forced) */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --md-primary: #B9C3FF;
+    --md-on-primary: #08218A;
+    --md-primary-container: #2A3CA0;
+    --md-on-primary-container: #DDE1FF;
+
+    --md-secondary: #C4C5DD;
+    --md-secondary-container: #434659;
+    --md-on-secondary-container: #E0E1F9;
+
+    --md-tertiary: #FABD49;
+    --md-tertiary-container: #614000;
+    --md-on-tertiary-container: #FFDDB1;
+
+    --md-error: #FFB4AB;
+    --md-error-container: #93000A;
+    --md-on-error-container: #FFDAD6;
+
+    --md-surface: #121318;
+    --md-surface-container-low: #1A1B21;
+    --md-surface-container: #1E1F25;
+    --md-surface-container-high: #282930;
+    --md-on-surface: #E4E1E9;
+    --md-on-surface-variant: #C7C5D0;
+    --md-outline: #91909A;
+    --md-outline-variant: #46464F;
+
+    --md-inverse-surface: #E4E1E9;
+    --md-inverse-on-surface: #303036;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -309,11 +380,65 @@ h1, h2, h3 { margin: 0; font-weight: 500; }
 .dialog-text { font-size: 15px; margin-bottom: 18px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 4px; }
 
+/* ---------- Swipe actions (orders & customers) ---------- */
+.swipe { position: relative; }
+.swipe-bg {
+  position: absolute; inset: 0; border-radius: var(--radius-m);
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 600; font-size: 14px;
+  visibility: hidden;
+}
+.swipe-bg svg { width: 20px; height: 20px; }
+.swipe-bg.left { background: var(--md-secondary-container); color: var(--md-on-secondary-container); justify-content: flex-start; padding-left: 20px; }
+.swipe-bg.right { background: var(--md-error-container); color: var(--md-on-error-container); justify-content: flex-end; padding-right: 20px; }
+.swipe.show-left .swipe-bg.left { visibility: visible; }
+.swipe.show-right .swipe-bg.right { visibility: visible; }
+.swipe .card { position: relative; z-index: 1; }
+
+/* ---------- Revenue chart ---------- */
+.chart { display: flex; align-items: flex-end; gap: 8px; height: 150px; padding-top: 8px; }
+.chart-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 5px; height: 100%; min-width: 0; }
+.chart-val { font-size: 10.5px; color: var(--md-on-surface-variant); white-space: nowrap; }
+.chart-bar { width: 100%; max-width: 44px; border-radius: 6px 6px 2px 2px; background: var(--md-primary); opacity: .45; min-height: 2px; }
+.chart-col.is-current .chart-bar { opacity: 1; }
+.chart-label { font-size: 11px; color: var(--md-on-surface-variant); }
+.chart-col.is-current .chart-label { font-weight: 700; color: var(--md-on-surface); }
+
+/* ---------- Top customers bars ---------- */
+.tc-row { display: grid; grid-template-columns: minmax(70px, 100px) 1fr auto; gap: 10px; align-items: center; padding: 6px 0; }
+.tc-name { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-track { height: 10px; border-radius: 5px; background: var(--md-surface-container-high); overflow: hidden; }
+.tc-fill { height: 100%; border-radius: 5px; background: var(--md-primary); }
+.tc-amount { font-size: 12.5px; font-weight: 600; }
+
+/* ---------- Period navigation ---------- */
+.period-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 0 0 12px; padding: 0 4px;
+}
+.period-nav .label { font-weight: 600; font-size: 15px; }
+.period-nav button {
+  width: 40px; height: 40px; border-radius: var(--radius-full);
+  font-size: 20px; color: var(--md-primary);
+  display: grid; place-items: center;
+}
+.period-nav button:active { background: var(--md-secondary-container); }
+.period-nav button:disabled { color: var(--md-outline-variant); }
+
+/* ---------- Theme button ---------- */
+.icon-btn {
+  width: 40px; height: 40px; border-radius: var(--radius-full);
+  display: grid; place-items: center; color: var(--md-on-surface-variant);
+}
+.icon-btn svg { width: 21px; height: 21px; }
+.icon-btn:active { background: var(--md-surface-container-high); }
+.top-bar-end { display: flex; align-items: center; gap: 8px; }
+
 /* ---------- Snackbar ---------- */
 .snackbar {
   position: fixed; left: 16px; right: 16px; z-index: 60;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
-  background: #2C3230; color: #ECF2EF;
+  background: var(--md-inverse-surface); color: var(--md-inverse-on-surface);
   padding: 13px 18px; border-radius: var(--radius-s);
   font-size: 14px; box-shadow: var(--md-elev-3);
   animation: rise .2s;
