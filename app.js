@@ -131,14 +131,18 @@ document.querySelectorAll('.nav-item').forEach(b =>
 function openSheet(html) {
   $('#sheetContent').innerHTML = html;
   const sheet = $('#sheet');
+  sheet.style.transition = '';
   sheet.style.transform = '';
   sheet.hidden = false;
+  sheet.scrollTop = 0; // a previous long sheet may have left it scrolled down
   $('#scrim').hidden = false;
 }
 function closeSheet() {
-  $('#sheet').hidden = true;
+  const sheet = $('#sheet');
+  sheet.hidden = true;
+  sheet.style.transition = '';
+  sheet.style.transform = '';
   $('#scrim').hidden = true;
-  $('#sheet').style.transform = '';
 }
 $('#scrim').addEventListener('click', closeSheet);
 
@@ -257,8 +261,10 @@ function attachSwipe(wrap, { onEdit, onDelete }) {
     if (!wasSwipe) return;
     actionFired = true;
     setTimeout(() => { actionFired = false; }, 400);
-    if (t < -80) onDelete();
-    else if (t > 80) onEdit();
+    // Open the follow-up UI a beat after the touch gesture has fully ended,
+    // so the sheet's entrance animation isn't disturbed by the gesture.
+    if (t < -80) setTimeout(onDelete, 30);
+    else if (t > 80) setTimeout(onEdit, 30);
   };
   card.addEventListener('touchend', end);
   card.addEventListener('touchcancel', end);
@@ -391,10 +397,15 @@ async function renderDashboard() {
         <div class="label">Ready for shipping</div>
         <div class="value">${readyToShip}</div>
       </div>
-      <div class="stat-card" style="grid-column:1/-1">
+      <div class="stat-card">
         <div class="label">Stock value</div>
         <div class="value">${fmtMoney(stockValue)}</div>
-        <div class="hint">current stock × selling price</div>
+        <div class="hint">stock × selling price</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Unrealised · ${periodLabel}</div>
+        <div class="value">${(profit + stockValue) < 0 ? '−' + fmtMoney(-(profit + stockValue)) : fmtMoney(profit + stockValue)}</div>
+        <div class="hint">profit + stock value if sold</div>
       </div>
       ${(lowStock + outOfStock) ? `
       <div class="stat-card warn" style="grid-column:1/-1" id="lowStockCard" role="button" tabindex="0">
