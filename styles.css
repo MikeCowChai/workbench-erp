@@ -233,6 +233,16 @@ h1, h2, h3 { margin: 0; font-weight: 500; }
 .row-end .big { font-weight: 600; }
 .row-end .sub { font-size: 12px; color: var(--md-on-surface-variant); }
 
+/* Inline edit button on list cards */
+.card-edit {
+  flex: none; align-self: center;
+  width: 40px; height: 40px; border-radius: var(--radius-full);
+  display: grid; place-items: center; color: var(--md-on-surface-variant);
+  margin: -6px -6px -6px 2px;
+}
+.card-edit svg { width: 19px; height: 19px; }
+.card-edit:active { background: var(--md-surface-container-high); color: var(--md-primary); }
+
 /* Stock badges */
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
@@ -379,21 +389,6 @@ h1, h2, h3 { margin: 0; font-weight: 500; }
 }
 .dialog-text { font-size: 15px; margin-bottom: 18px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 4px; }
-
-/* ---------- Swipe actions (orders & customers) ---------- */
-.swipe { position: relative; }
-.swipe-bg {
-  position: absolute; inset: 0; border-radius: var(--radius-m);
-  display: flex; align-items: center; gap: 8px;
-  font-weight: 600; font-size: 14px;
-  visibility: hidden;
-}
-.swipe-bg svg { width: 20px; height: 20px; }
-.swipe-bg.left { background: var(--md-secondary-container); color: var(--md-on-secondary-container); justify-content: flex-start; padding-left: 20px; }
-.swipe-bg.right { background: var(--md-error-container); color: var(--md-on-error-container); justify-content: flex-end; padding-right: 20px; }
-.swipe.show-left .swipe-bg.left { visibility: visible; }
-.swipe.show-right .swipe-bg.right { visibility: visible; }
-.swipe .card { position: relative; z-index: 1; }
 
 /* ---------- Revenue chart ---------- */
 .chart { display: flex; align-items: flex-end; gap: 8px; height: 150px; padding-top: 8px; }

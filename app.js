@@ -228,66 +228,11 @@ function showConfirm(message, onConfirm) {
   $('#confirmOk').onclick = () => { close(); onConfirm(); };
 }
 
-/* Swipeable card: drag right → edit (left pane), drag left → delete (right
-   pane). Locks to horizontal or vertical after the first ~12px so list
-   scrolling keeps working; a completed swipe swallows the follow-up click. */
-function attachSwipe(wrap, { onEdit, onDelete }) {
-  const card = wrap.querySelector('.card');
-  let sx = 0, sy = 0, dx = 0, mode = null, actionFired = false;
-
-  card.addEventListener('touchstart', e => {
-    sx = e.touches[0].clientX; sy = e.touches[0].clientY;
-    dx = 0; mode = null;
-    card.style.transition = 'none';
-  }, { passive: true });
-
-  card.addEventListener('touchmove', e => {
-    const x = e.touches[0].clientX - sx, y = e.touches[0].clientY - sy;
-    if (mode === null) {
-      if (Math.abs(x) > 12 && Math.abs(x) > Math.abs(y) * 1.5) mode = 'swipe';
-      else if (Math.abs(y) > 12) mode = 'scroll';
-      else return;
-    }
-    if (mode !== 'swipe') return;
-    e.preventDefault();
-    dx = x;
-    card.style.transform = `translateX(${dx}px)`;
-    wrap.classList.toggle('show-left', dx > 0);
-    wrap.classList.toggle('show-right', dx < 0);
-  }, { passive: false });
-
-  const end = () => {
-    const wasSwipe = mode === 'swipe';
-    const t = dx;
-    mode = null; dx = 0;
-    card.style.transition = 'transform .18s ease';
-    card.style.transform = '';
-    setTimeout(() => wrap.classList.remove('show-left', 'show-right'), 180);
-    if (!wasSwipe) return;
-    actionFired = true;
-    setTimeout(() => { actionFired = false; }, 400);
-    // Let the swipe animation finish and the browser exit its touch-gesture
-    // state BEFORE opening a fixed-position sheet. Clearing the inline
-    // transform/transition first prevents the sheet from inheriting the
-    // card's animation frame (which mis-anchored it to the page, not the
-    // viewport). Two rAFs + a short delay reliably clears it on Android.
-    const fire = t < -80 ? onDelete : t > 80 ? onEdit : null;
-    if (!fire) return;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      card.style.transition = '';
-      card.style.transform = '';
-      setTimeout(fire, 60);
-    }));
-  };
-  card.addEventListener('touchend', end);
-  card.addEventListener('touchcancel', end);
-  card.addEventListener('click', e => {
-    if (actionFired) { e.stopImmediatePropagation(); e.preventDefault(); }
-  }, true);
-}
-const SWIPE_PANES = `
-  <div class="swipe-bg left"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z"/></svg>Edit</div>
-  <div class="swipe-bg right">Delete<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z"/></svg></div>`;
+/* Swipe was removed — it fought with scrolling and mis-anchored sheets on
+   Android. attachSwipe is now a no-op so existing call sites keep working;
+   edit/delete run through long-press (attachLongPress) instead. */
+function attachSwipe() { /* intentionally empty */ }
+const SWIPE_PANES = '';
 
 let snackTimer = null;
 function snack(msg) {
@@ -503,6 +448,7 @@ function fmtStock(p) {
 // 'tracked' | 'made' (made to order, never stocked) | 'service' (e.g. Delivery)
 const stockMode = p => p.stockMode || (p.trackStock === false ? 'service' : 'tracked');
 const MODE_TAGS = { made: 'made to order', service: 'service' };
+const EDIT_ICON = '<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z"/></svg>';
 
 function stockBadge(p) {
   if (p.trackStock === false) return '';
@@ -535,6 +481,7 @@ async function renderProducts() {
               ? `<div class="big">∞</div><div class="sub">${MODE_TAGS[stockMode(p)]}</div>`
               : `<div class="big">${fmtStock(p)}</div><div class="sub">in stock</div>`}
           </div>
+          <button class="card-edit" data-edit title="Edit">${EDIT_ICON}</button>
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No products found</div><div>${products.length ? 'Try a different search or filter.' : 'Add your first product with the button below.'}</div></div>`;
@@ -542,13 +489,14 @@ async function renderProducts() {
   document.querySelectorAll('#productList .swipe[data-pid]').forEach(wrap => {
     const p = list.find(x => x.id === Number(wrap.dataset.pid));
     const card = wrap.querySelector('.card');
-    card.addEventListener('click', () => openProductForm(p.id));
     const confirmDelete = () => showConfirm(`Delete “${p.name}”?`, async () => {
       await DB.delete('products', p.id);
       snack('Product deleted'); render();
     });
-    attachSwipe(wrap, { onEdit: () => openProductForm(p.id), onDelete: confirmDelete });
-    attachLongPress(card, () => confirmDelete());
+    const options = () => openItemOptions(p.name, { onEdit: () => openProductForm(p.id), onDelete: confirmDelete });
+    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); options(); });
+    card.addEventListener('click', () => openProductForm(p.id));
+    attachLongPress(card, options);
   });
 }
 
@@ -569,18 +517,21 @@ async function renderPurchases() {
             <div class="sub">${cat(p)}${p.supplier ? ' · ' + esc(p.supplier) : ''} · ${fmtDate(p.receivedAt)}</div>
           </div>
           <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
+          <button class="card-edit" data-edit title="Edit">${EDIT_ICON}</button>
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No purchases found</div><div>${purchases.length ? 'Try a different category filter.' : 'Money spent on stock or materials will appear here.'}</div></div>`;
 
   document.querySelectorAll('#purchaseList .swipe[data-puid]').forEach(wrap => {
     const p = purchases.find(x => x.id === Number(wrap.dataset.puid));
+    const card = wrap.querySelector('.card');
     const confirmDelete = () => showConfirm(`Delete purchase “${p.description}” (${fmtMoney(p.amount)})?`, async () => {
       await DB.delete('purchases', p.id);
       snack('Purchase deleted'); render();
     });
-    attachSwipe(wrap, { onEdit: () => openPurchaseForm(p), onDelete: confirmDelete });
-    attachLongPress(wrap.querySelector('.card'), () => confirmDelete());
+    const options = () => openItemOptions(p.description, { onEdit: () => openPurchaseForm(p), onDelete: confirmDelete });
+    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); options(); });
+    attachLongPress(card, options);
   });
 
   // Prefill the log form's date with today
@@ -813,6 +764,7 @@ async function renderOrders() {
           <div class="sub">${fmtDate(o.createdAt)}</div>
           ${o.discountPct > 0 ? `<div class="sub">${o.discountPct}% discount</div>` : ''}
         </div>
+        <button class="card-edit" data-edit title="Options">${EDIT_ICON}</button>
       </div>
       ${railHTML(o)}
       </div>
@@ -821,12 +773,9 @@ async function renderOrders() {
 
   document.querySelectorAll('#orderList .swipe[data-oid]').forEach(wrap => {
     const o = list.find(x => x.id === Number(wrap.dataset.oid));
-    const confirmDelete = () => showConfirm(`Delete order #${o.id} (${o.customerName}, ${fmtMoney(o.total)})? Stock is not restored.`, async () => {
-      await DB.delete('orders', o.id);
-      snack(`Order #${o.id} deleted`); render();
-    });
-    attachSwipe(wrap, { onEdit: () => openOrderOptions(o), onDelete: confirmDelete });
-    attachLongPress(wrap.querySelector('.card'), () => openOrderOptions(o));
+    const card = wrap.querySelector('.card');
+    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); openOrderOptions(o); });
+    attachLongPress(card, () => openOrderOptions(o));
   });
 
   document.querySelectorAll('[data-advance]').forEach(btn =>
@@ -838,6 +787,18 @@ async function renderOrders() {
       snack(`Order #${o.id} → ${next}`);
       render();
     }));
+}
+
+/* Small long-press menu: Edit / Delete. */
+function openItemOptions(title, { onEdit, onDelete }) {
+  openSheet(`
+    <h2>${esc(title)}</h2>
+    <div class="form-card">
+      <button class="btn-tonal" id="ioEdit">Edit</button>
+      <button class="btn-text danger" id="ioDelete">Delete</button>
+    </div>`);
+  $('#ioEdit').onclick = () => { closeSheet(); onEdit(); };
+  $('#ioDelete').onclick = () => { closeSheet(); onDelete(); };
 }
 
 /* ----- Receipt sharing ----- */
@@ -1197,6 +1158,7 @@ async function renderCustomers() {
             <div class="big">${fmtMoney(c.spent)}</div>
             <div class="sub">${c.orderCount} order${c.orderCount === 1 ? '' : 's'}</div>
           </div>
+          <button class="card-edit" data-edit title="Edit">${EDIT_ICON}</button>
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No customers found</div><div>${customers.length ? 'Try a different search.' : 'Customers are added here or when you create an order.'}</div></div>`;
@@ -1204,13 +1166,14 @@ async function renderCustomers() {
   document.querySelectorAll('#customerList .swipe[data-cid]').forEach(wrap => {
     const c = list.find(x => x.id === Number(wrap.dataset.cid));
     const card = wrap.querySelector('.card');
-    card.addEventListener('click', () => openCustomerDetail(c.id));
     const confirmDelete = () => showConfirm(`Delete customer “${c.name}”? Their past orders stay in the order list.`, async () => {
       await DB.delete('customers', c.id);
       snack('Customer deleted'); render();
     });
-    attachSwipe(wrap, { onEdit: () => openCustomerForm(c.id), onDelete: confirmDelete });
-    attachLongPress(card, () => confirmDelete());
+    const options = () => openItemOptions(c.name, { onEdit: () => openCustomerForm(c.id), onDelete: confirmDelete });
+    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); options(); });
+    card.addEventListener('click', () => openCustomerDetail(c.id));
+    attachLongPress(card, options);
   });
 }
 
