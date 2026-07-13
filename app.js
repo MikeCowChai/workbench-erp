@@ -35,6 +35,20 @@ const lineTotal = l => l.unitType === 'weight' || l.weightBased
   : (l.qty || 0) * (l.unitPrice || 0);
 const $ = sel => document.querySelector(sel);
 
+/* Date-input helpers: today keeps the exact current time (natural activity
+   ordering); a backdated day is stored at noon local time. */
+const tsToDateInput = ts => {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const dateInputToTs = str => {
+  if (!str) return null;
+  const [y, m, d] = str.split('-').map(Number);
+  const t = new Date();
+  const isToday = y === t.getFullYear() && m === t.getMonth() + 1 && d === t.getDate();
+  return isToday ? Date.now() : new Date(y, m - 1, d, 12).getTime();
+};
+
 const state = {
   view: 'dashboard',
   invTab: 'stock',
@@ -288,15 +302,15 @@ async function renderDashboard() {
   const costs = periodPurchases.reduce((s, pu) => s + (pu.amount || 0), 0);
   const profit = revenue - costs;
 
-  // Month-on-month revenue, last 6 months (independent of the selector).
+  // Month-on-month revenue vs costs, last 6 months (independent of the selector).
   const monthly = [...Array(6)].map((_, k) => {
-    const s = new Date(now.getFullYear(), now.getMonth() - 5 + k, 1);
-    const e = new Date(now.getFullYear(), now.getMonth() - 4 + k, 1);
-    const rev = orders.filter(o => o.createdAt >= s.getTime() && o.createdAt < e.getTime())
-      .reduce((sum, o) => sum + o.total, 0);
-    return { label: s.toLocaleDateString(undefined, { month: 'short' }), rev, current: k === 5 };
+    const s = new Date(now.getFullYear(), now.getMonth() - 5 + k, 1).getTime();
+    const e = new Date(now.getFullYear(), now.getMonth() - 4 + k, 1).getTime();
+    const rev = orders.filter(o => o.createdAt >= s && o.createdAt < e).reduce((sum, o) => sum + o.total, 0);
+    const cost = purchases.filter(pu => pu.receivedAt >= s && pu.receivedAt < e).reduce((sum, pu) => sum + (pu.amount || 0), 0);
+    return { label: new Date(s).toLocaleDateString(undefined, { month: 'short' }), rev, cost, current: k === 5 };
   });
-  const maxRev = Math.max(1, ...monthly.map(m => m.rev));
+  const maxRev = Math.max(1, ...monthly.map(m => Math.max(m.rev, m.cost)));
   const fmtCompact = n => n >= 10000 ? '฿' + Math.round(n / 1000) + 'k' : n >= 1000 ? '฿' + (n / 1000).toFixed(1) + 'k' : '฿' + n;
 
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
@@ -372,15 +386,22 @@ async function renderDashboard() {
         <div class="hint">${lowStock} low · ${outOfStock} out of stock — tap to review</div>
       </div>` : ''}
     </div>
-    <h2 class="section-label">Revenue · last 6 months</h2>
+    <h2 class="section-label">Revenue vs costs · last 6 months</h2>
     <div class="card">
       <div class="chart">
         ${monthly.map(m => `
           <div class="chart-col ${m.current ? 'is-current' : ''}">
             <span class="chart-val">${m.rev ? fmtCompact(m.rev) : ''}</span>
-            <div class="chart-bar" style="height:${Math.round(m.rev / maxRev * 100)}%"></div>
+            <div class="chart-bars">
+              <div class="chart-bar" style="height:${Math.round(m.rev / maxRev * 100)}%" title="Revenue ${fmtMoney(m.rev)}"></div>
+              <div class="chart-bar cost" style="height:${Math.round(m.cost / maxRev * 100)}%" title="Costs ${fmtMoney(m.cost)}"></div>
+            </div>
             <span class="chart-label">${m.label}</span>
           </div>`).join('')}
+      </div>
+      <div class="chart-legend">
+        <span><span class="legend-dot rev"></span>Revenue</span>
+        <span><span class="legend-dot cost"></span>Costs</span>
       </div>
     </div>
     <h2 class="section-label">Recent activity</h2>
@@ -440,28 +461,34 @@ async function renderProducts() {
   list.sort((a, b) => a.name.localeCompare(b.name));
 
   $('#productList').innerHTML = list.map(p => `
-    <div class="card is-tappable" data-pid="${p.id}" role="button" tabindex="0">
-      <div class="row">
-        <div class="row-main">
-          <div class="name">${esc(p.name)}</div>
-          <div class="sub">${esc(p.sku || 'No SKU')} · ${fmtMoney(p.price)} / ${p.unit === 'weight' ? 'kg' : 'unit'}</div>
-          ${stockBadge(p)}
-        </div>
-        <div class="row-end">
-          ${p.trackStock === false
-            ? `<div class="big">∞</div><div class="sub">${MODE_TAGS[stockMode(p)]}</div>`
-            : `<div class="big">${fmtStock(p)}</div><div class="sub">in stock</div>`}
+    <div class="swipe" data-pid="${p.id}">
+      ${SWIPE_PANES}
+      <div class="card is-tappable" role="button" tabindex="0">
+        <div class="row">
+          <div class="row-main">
+            <div class="name">${esc(p.name)}</div>
+            <div class="sub">${esc(p.sku || 'No SKU')} · ${fmtMoney(p.price)} / ${p.unit === 'weight' ? 'kg' : 'unit'}</div>
+            ${stockBadge(p)}
+          </div>
+          <div class="row-end">
+            ${p.trackStock === false
+              ? `<div class="big">∞</div><div class="sub">${MODE_TAGS[stockMode(p)]}</div>`
+              : `<div class="big">${fmtStock(p)}</div><div class="sub">in stock</div>`}
+          </div>
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No products found</div><div>${products.length ? 'Try a different search or filter.' : 'Add your first product with the button below.'}</div></div>`;
 
-  document.querySelectorAll('#productList [data-pid]').forEach(el => {
-    el.addEventListener('click', () => openProductForm(Number(el.dataset.pid)));
-    const p = list.find(x => x.id === Number(el.dataset.pid));
-    attachLongPress(el, () => showConfirm(`Delete “${p.name}”?`, async () => {
+  document.querySelectorAll('#productList .swipe[data-pid]').forEach(wrap => {
+    const p = list.find(x => x.id === Number(wrap.dataset.pid));
+    const card = wrap.querySelector('.card');
+    card.addEventListener('click', () => openProductForm(p.id));
+    const confirmDelete = () => showConfirm(`Delete “${p.name}”?`, async () => {
       await DB.delete('products', p.id);
       snack('Product deleted'); render();
-    }));
+    });
+    attachSwipe(wrap, { onEdit: () => openProductForm(p.id), onDelete: confirmDelete });
+    attachLongPress(card, () => confirmDelete());
   });
 }
 
@@ -470,37 +497,73 @@ async function renderPurchases() {
   const purchases = await DB.getAll('purchases');
   purchases.sort((a, b) => b.receivedAt - a.receivedAt);
   $('#purchaseList').innerHTML = purchases.slice(0, 30).map(p => `
-    <div class="card" data-puid="${p.id}">
-      <div class="row">
-        <div class="row-main">
-          <div class="name">${esc(p.description)}</div>
-          <div class="sub">${p.supplier ? esc(p.supplier) + ' · ' : ''}${fmtDate(p.receivedAt)}</div>
+    <div class="swipe" data-puid="${p.id}">
+      ${SWIPE_PANES}
+      <div class="card">
+        <div class="row">
+          <div class="row-main">
+            <div class="name">${esc(p.description)}</div>
+            <div class="sub">${p.supplier ? esc(p.supplier) + ' · ' : ''}${fmtDate(p.receivedAt)}</div>
+          </div>
+          <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
         </div>
-        <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
       </div>
     </div>`).join('') || '<div class="empty"><div class="title">No purchases yet</div><div>Money spent on stock or materials will appear here.</div></div>';
 
-  document.querySelectorAll('#purchaseList [data-puid]').forEach(el => {
-    const p = purchases.find(x => x.id === Number(el.dataset.puid));
-    attachLongPress(el, () => showConfirm(`Delete purchase “${p.description}” (${fmtMoney(p.amount)})?`, async () => {
+  document.querySelectorAll('#purchaseList .swipe[data-puid]').forEach(wrap => {
+    const p = purchases.find(x => x.id === Number(wrap.dataset.puid));
+    const confirmDelete = () => showConfirm(`Delete purchase “${p.description}” (${fmtMoney(p.amount)})?`, async () => {
       await DB.delete('purchases', p.id);
       snack('Purchase deleted'); render();
-    }));
+    });
+    attachSwipe(wrap, { onEdit: () => openPurchaseForm(p), onDelete: confirmDelete });
+    attachLongPress(wrap.querySelector('.card'), () => confirmDelete());
   });
+
+  // Prefill the log form's date with today
+  if (!$('#poDate').value) $('#poDate').value = tsToDateInput(Date.now());
+}
+
+/* Edit an existing expense entry. */
+function openPurchaseForm(p) {
+  openSheet(`
+    <h2>Edit purchase</h2>
+    <div class="form-card">
+      <label class="field"><span>What did you buy</span><input id="peDescription" value="${esc(p.description)}"></label>
+      <div class="field-row">
+        <label class="field"><span>Amount spent (฿)</span><input id="peAmount" type="number" min="0" step="1" inputmode="numeric" value="${p.amount}"></label>
+        <label class="field"><span>Date</span><input type="date" id="peDate" value="${tsToDateInput(p.receivedAt)}"></label>
+      </div>
+      <label class="field"><span>Supplier (optional)</span><input id="peSupplier" value="${esc(p.supplier || '')}"></label>
+      <button class="btn-filled" id="peSave">Save changes</button>
+    </div>`);
+  $('#peSave').onclick = async () => {
+    const description = $('#peDescription').value.trim();
+    const amount = Number($('#peAmount').value);
+    const ts = dateInputToTs($('#peDate').value);
+    if (!description) return snack('Enter what you bought');
+    if (!(amount > 0)) return snack('Enter an amount greater than 0');
+    if (!ts) return snack('Pick a date');
+    await DB.put('purchases', { ...p, description, amount, supplier: $('#peSupplier').value.trim(), receivedAt: ts });
+    closeSheet(); snack('Purchase updated'); render();
+  };
 }
 
 $('#poReceive').addEventListener('click', async () => {
   const description = $('#poDescription').value.trim();
   const amount = Number($('#poAmount').value);
+  const ts = dateInputToTs($('#poDate').value);
   if (!description) return snack('Enter what you bought');
   if (!(amount > 0)) return snack('Enter an amount greater than 0');
+  if (!ts) return snack('Pick a date');
 
   await DB.add('purchases', {
     description, amount,
     supplier: $('#poSupplier').value.trim(),
-    receivedAt: Date.now()
+    receivedAt: ts
   });
   $('#poDescription').value = ''; $('#poAmount').value = ''; $('#poSupplier').value = '';
+  $('#poDate').value = tsToDateInput(Date.now());
   snack(`Logged ${fmtMoney(amount)} — ${description}`);
   render();
 });
@@ -866,8 +929,7 @@ async function openOrderForm() {
   $('#ofAddLine').onclick = () => { lines.push(newLine()); drawLines(); };
   $('#ofDiscount').addEventListener('input', updateTotal);
   // Prefill order date with today (local time)
-  const _t = new Date();
-  $('#ofDate').value = `${_t.getFullYear()}-${String(_t.getMonth() + 1).padStart(2, '0')}-${String(_t.getDate()).padStart(2, '0')}`;
+  $('#ofDate').value = tsToDateInput(Date.now());
   $('#ofCustomer').onchange = async e => {
     const id = Number(e.target.value);
     $('#ofNewCustomer').hidden = !!id;
@@ -912,12 +974,8 @@ async function openOrderForm() {
 
     // Order date: today keeps the exact current time (so activity ordering
     // stays natural); a backdated order is stored at noon local time.
-    const dateStr = $('#ofDate').value;
-    if (!dateStr) return snack('Pick an order date');
-    const [y, m, d] = dateStr.split('-').map(Number);
-    const today = new Date();
-    const isToday = y === today.getFullYear() && m === today.getMonth() + 1 && d === today.getDate();
-    const createdAt = isToday ? Date.now() : new Date(y, m - 1, d, 12).getTime();
+    const createdAt = dateInputToTs($('#ofDate').value);
+    if (!createdAt) return snack('Pick an order date');
 
     const subtotal = items.reduce((s, i) => s + i.lineTotal, 0);
     const discountPct = Math.min(100, Math.max(0, Number($('#ofDiscount').value) || 0));

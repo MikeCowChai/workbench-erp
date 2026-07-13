@@ -399,10 +399,17 @@ h1, h2, h3 { margin: 0; font-weight: 500; }
 .chart { display: flex; align-items: flex-end; gap: 8px; height: 150px; padding-top: 8px; }
 .chart-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 5px; height: 100%; min-width: 0; }
 .chart-val { font-size: 10.5px; color: var(--md-on-surface-variant); white-space: nowrap; }
-.chart-bar { width: 100%; max-width: 44px; border-radius: 6px 6px 2px 2px; background: var(--md-primary); opacity: .45; min-height: 2px; }
+.chart-bars { display: flex; gap: 3px; width: 100%; height: 100%; align-items: flex-end; justify-content: center; }
+.chart-bar { width: 100%; max-width: 22px; border-radius: 5px 5px 2px 2px; background: var(--md-primary); opacity: .45; min-height: 2px; }
+.chart-bar.cost { background: var(--md-tertiary); }
 .chart-col.is-current .chart-bar { opacity: 1; }
 .chart-label { font-size: 11px; color: var(--md-on-surface-variant); }
 .chart-col.is-current .chart-label { font-weight: 700; color: var(--md-on-surface); }
+.chart-legend { display: flex; gap: 18px; justify-content: center; margin-top: 12px; font-size: 12.5px; color: var(--md-on-surface-variant); }
+.chart-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.legend-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend-dot.rev { background: var(--md-primary); }
+.legend-dot.cost { background: var(--md-tertiary); }
 
 /* ---------- Top customers bars ---------- */
 .tc-row { display: grid; grid-template-columns: minmax(70px, 100px) 1fr auto; gap: 10px; align-items: center; padding: 6px 0; }
