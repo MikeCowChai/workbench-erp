@@ -175,6 +175,31 @@ const DB = (() => {
       return api.add('purchases', purchase);
     },
 
+    /* Full backup: every store in one JSON-able object. */
+    async exportAll() {
+      const [products, customers, orders, purchases] = await Promise.all([
+        api.getAll('products'), api.getAll('customers'),
+        api.getAll('orders'), api.getAll('purchases')
+      ]);
+      return { app: 'buddyboard', version: 1, exportedAt: Date.now(), products, customers, orders, purchases };
+    },
+
+    /* Restore a backup: atomically REPLACES all data in every store. */
+    async importAll(data) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const stores = ['products', 'customers', 'orders', 'purchases'];
+        const t = db.transaction(stores, 'readwrite');
+        stores.forEach(name => {
+          const s = t.objectStore(name);
+          s.clear();
+          (data[name] || []).forEach(r => s.put(r));
+        });
+        t.oncomplete = () => resolve();
+        t.onerror = () => reject(t.error);
+      });
+    },
+
     /* Atomic: give an order a different number. Fails if the number is taken. */
     async changeOrderId(oldId, newId) {
       const db = await open();

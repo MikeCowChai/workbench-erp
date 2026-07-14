@@ -1,5 +1,5 @@
 /* ============================================================
-   app.js — Workbench ERP
+   app.js — BuddyBoard
    Views: Dashboard · Inventory (Stock / Incoming purchases)
           Orders · Customers
    ============================================================ */
@@ -37,6 +37,14 @@ const $ = sel => document.querySelector(sel);
 
 /* Date-input helpers: today keeps the exact current time (natural activity
    ordering); a backdated day is stored at noon local time. */
+const fmtTime = ts => {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+const tsToTimeInput = ts => fmtTime(ts);
+/* Order number format: DNBB + 2-digit year of the order date + 4-digit
+   sequence, e.g. order #7 placed in 2026 → DNBB260007. */
+const orderNo = o => `DNBB${String(new Date(o.createdAt).getFullYear()).slice(-2)}${String(o.id).padStart(4, '0')}`;
 const tsToDateInput = ts => {
   const d = new Date(ts);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -54,7 +62,7 @@ const state = {
   invTab: 'stock',
   stockFilter: 'all',
   purchaseFilter: 'all',
-  statusFilter: 'all',
+  statusFilter: 'open', // default: everything that isn't Delivered yet
   period: 'month', // dashboard stats: 'month' | 'quarter' | 'year'
   periodOffset: 0, // 0 = current period, -1 = previous, etc.
   search: { product: '', order: '', customer: '' }
@@ -87,6 +95,13 @@ $('#themeBtn').addEventListener('click', () => {
         <textarea id="stFooter" rows="4" placeholder="Name:&#10;Your name&#10;Accountnumber SCB 1234567890">${esc(footer)}</textarea>
       </label>
       <button class="btn-filled" id="stSave">Save settings</button>
+    </div>
+    <h2 class="section-label">Backup</h2>
+    <div class="form-card">
+      <button class="btn-tonal" id="stExport">Export all data (JSON)</button>
+      <button class="btn-tonal" id="stImport">Import backup…</button>
+      <input type="file" id="stImportFile" accept=".json,application/json" hidden>
+      <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant)">Your data lives only on this device. Export a backup regularly and keep it somewhere safe (Drive, email to yourself). Importing replaces everything.</div>
     </div>`);
   document.querySelectorAll('[data-theme-pick]').forEach(c =>
     c.addEventListener('click', () => {
@@ -96,6 +111,51 @@ $('#themeBtn').addEventListener('click', () => {
   $('#stSave').onclick = () => {
     localStorage.setItem('erp_receipt_footer', $('#stFooter').value);
     closeSheet(); snack('Settings saved');
+  };
+
+  $('#stExport').onclick = async () => {
+    const data = await DB.exportAll();
+    data.settings = {
+      theme: localStorage.getItem('erp_theme') || 'auto',
+      receiptFooter: localStorage.getItem('erp_receipt_footer') || ''
+    };
+    const name = `buddyboard-backup-${tsToDateInput(Date.now())}.json`;
+    const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
+    const file = new File([blob], name, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: name }); return; } catch (e) { /* cancelled */ }
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    snack('Backup exported');
+  };
+
+  $('#stImport').onclick = () => $('#stImportFile').click();
+  $('#stImportFile').onchange = async e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    let data;
+    try {
+      data = JSON.parse(await f.text());
+      if (data.app !== 'buddyboard' || !Array.isArray(data.orders)) throw new Error();
+    } catch { return snack('Not a valid BuddyBoard backup file'); }
+    const when = data.exportedAt ? new Date(data.exportedAt).toLocaleDateString() : 'unknown date';
+    showConfirm(
+      `Import backup from ${when} (${(data.orders || []).length} orders, ${(data.products || []).length} products)? This REPLACES everything currently in the app.`,
+      async () => {
+        await DB.importAll(data);
+        if (data.settings) {
+          if (data.settings.theme) applyTheme(data.settings.theme);
+          if (data.settings.receiptFooter != null) localStorage.setItem('erp_receipt_footer', data.settings.receiptFooter);
+        }
+        localStorage.setItem('erp_delivery_seeded', '1');
+        closeSheet(); snack('Backup imported'); render();
+      },
+      'Import'
+    );
   };
 });
 applyTheme(localStorage.getItem('erp_theme') || 'auto');
@@ -201,7 +261,7 @@ function attachLongPress(el, fn) {
       fired = true;
       if (navigator.vibrate) navigator.vibrate(30);
       fn();
-    }, 550);
+    }, 400);
   };
   const cancel = () => clearTimeout(timer);
   el.addEventListener('touchstart', start, { passive: true });
@@ -218,8 +278,9 @@ function attachLongPress(el, fn) {
 }
 
 /* Confirm dialog for destructive actions. */
-function showConfirm(message, onConfirm) {
+function showConfirm(message, onConfirm, okLabel = 'Delete') {
   $('#confirmText').textContent = message;
+  $('#confirmOk').textContent = okLabel;
   $('#confirmDialog').hidden = false;
   $('#confirmScrim').hidden = false;
   const close = () => { $('#confirmDialog').hidden = true; $('#confirmScrim').hidden = true; };
@@ -252,6 +313,8 @@ async function render() {
 }
 
 /* ----- Dashboard ----- */
+const SEC_DEFAULTS = { chart: '1', cat: '0', sellers: '0', outlook: '0', activity: '1' };
+const isSecOpen = k => (localStorage.getItem('erp_sec_' + k) ?? SEC_DEFAULTS[k]) === '1';
 async function renderDashboard() {
   const [orders, products, purchases] = await Promise.all([
     DB.getAll('orders'), DB.getAll('products'), DB.getAll('purchases')
@@ -294,6 +357,35 @@ async function renderDashboard() {
   const maxRev = Math.max(1, ...monthly.map(m => Math.max(m.rev, m.cost)));
   const fmtCompact = n => n >= 10000 ? '฿' + Math.round(n / 1000) + 'k' : n >= 1000 ? '฿' + (n / 1000).toFixed(1) + 'k' : '฿' + n;
 
+  // Best & worst sellers within the selected period, ranked by revenue.
+  const perf = {};
+  periodOrders.forEach(o => o.items.forEach(i => {
+    const lt = i.lineTotal !== undefined ? i.lineTotal : i.qty * i.unitPrice;
+    if (!perf[i.name]) perf[i.name] = { name: i.name, revenue: 0, qty: 0, weight: i.unitType === 'weight' };
+    perf[i.name].revenue += lt;
+    perf[i.name].qty += i.qty;
+  }));
+  const perfRows = Object.values(perf).sort((a, b) => b.revenue - a.revenue).slice(0, 8);
+  const maxPerf = perfRows.length ? perfRows[0].revenue : 1;
+
+  // Stock outlook: how long current stock lasts at the sales rate of the
+  // last 90 days. Only tracked products that actually sold in that window.
+  const OUTLOOK_DAYS = 90;
+  const soldSince = Date.now() - OUTLOOK_DAYS * 86400000;
+  const soldPer = {};
+  orders.forEach(o => {
+    if (o.createdAt < soldSince) return;
+    o.items.forEach(i => { soldPer[i.productId] = (soldPer[i.productId] || 0) + i.qty; });
+  });
+  const outlook = products
+    .filter(p => p.trackStock !== false && soldPer[p.id] > 0)
+    .map(p => {
+      const perDay = soldPer[p.id] / OUTLOOK_DAYS;
+      return { p, perMonth: perDay * 30, daysLeft: p.stock / perDay };
+    })
+    .sort((a, b) => a.daysLeft - b.daysLeft)
+    .slice(0, 5);
+
   const inProduction = orders.filter(o => o.status === STATUSES[0]).length;
   const readyToShip = orders.filter(o => o.status === STATUSES[1]).length;
   // Current stock value at selling price; weight stock is in grams, priced per kg.
@@ -307,9 +399,9 @@ async function renderDashboard() {
   // Activity feed: newest order events + stock receipts, merged.
   const events = [];
   orders.forEach(o => {
-    events.push({ ts: o.createdAt, type: 'sale', text: `Order #${o.id} — ${esc(o.customerName)}, ${fmtMoney(o.total)}` });
+    events.push({ ts: o.createdAt, type: 'sale', text: `${orderNo(o)} — ${esc(o.customerName)}, ${fmtMoney(o.total)}` });
     if (o.statusChangedAt && o.status !== STATUSES[0])
-      events.push({ ts: o.statusChangedAt, type: 'status', text: `Order #${o.id} moved to “${o.status}”` });
+      events.push({ ts: o.statusChangedAt, type: 'status', text: `${orderNo(o)} moved to “${o.status}”` });
   });
   purchases.forEach(p => events.push({ ts: p.receivedAt, type: 'stock', text: `Spent ${fmtMoney(p.amount)} on ${esc(p.description)}${p.supplier ? ' — ' + esc(p.supplier) : ''}` }));
   events.sort((a, b) => b.ts - a.ts);
@@ -317,7 +409,7 @@ async function renderDashboard() {
   const empty = !orders.length && !products.length;
   $('#view-dashboard').innerHTML = empty ? `
     <div class="empty">
-      <div class="title">Your workbench is empty</div>
+      <div class="title">BuddyBoard is empty</div>
       <div>Add products and orders, or start with sample data to explore the app.</div>
       <button class="btn-tonal" id="seedBtn">Load sample data</button>
     </div>` : `
@@ -372,7 +464,8 @@ async function renderDashboard() {
         <div class="hint">${lowStock} low · ${outOfStock} out of stock — tap to review</div>
       </div>` : ''}
     </div>
-    <h2 class="section-label">Revenue vs costs · last 6 months</h2>
+    <details class="section" data-sec="chart" ${isSecOpen('chart') ? 'open' : ''}>
+    <summary class="section-label">Revenue vs costs · last 6 months</summary>
     <div class="card">
       <div class="chart">
         ${monthly.map(m => `
@@ -390,6 +483,7 @@ async function renderDashboard() {
         <span><span class="legend-dot cost"></span>Costs</span>
       </div>
     </div>
+    </details>
     ${costs > 0 ? (() => {
       const byCat = {};
       periodPurchases.forEach(pu => {
@@ -399,7 +493,8 @@ async function renderDashboard() {
       const rows = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
       const maxCat = rows[0][1];
       return `
-      <h2 class="section-label">Costs by category · ${periodLabel}</h2>
+      <details class="section" data-sec="cat" ${isSecOpen('cat') ? 'open' : ''}>
+      <summary class="section-label">Costs by category · ${periodLabel}</summary>
       <div class="card">
         ${rows.map(([c, amt]) => `
           <div class="tc-row">
@@ -407,9 +502,36 @@ async function renderDashboard() {
             <div class="tc-track"><div class="tc-fill cost" style="width:${Math.max(4, Math.round(amt / maxCat * 100))}%"></div></div>
             <div class="tc-amount">${fmtMoney(amt)}</div>
           </div>`).join('')}
-      </div>`;
+      </div>
+      </details>`;
     })() : ''}
-    <h2 class="section-label">Recent activity</h2>
+    ${perfRows.length ? `
+    <details class="section" data-sec="sellers" ${isSecOpen('sellers') ? 'open' : ''}>
+    <summary class="section-label">Best & worst sellers · ${periodLabel}</summary>
+    <div class="card">
+      ${perfRows.map(r => `
+        <div class="tc-row">
+          <div class="tc-name">${esc(r.name)}</div>
+          <div class="tc-track"><div class="tc-fill" style="width:${Math.max(4, Math.round(r.revenue / maxPerf * 100))}%"></div></div>
+          <div class="tc-amount">${fmtMoney(r.revenue)}<div class="sub" style="font-weight:400;font-size:11px;color:var(--md-on-surface-variant)">${r.weight ? fmtGrams(r.qty) : r.qty + '×'}</div></div>
+        </div>`).join('')}
+    </div>
+    </details>` : ''}
+    ${outlook.length ? `
+    <details class="section" data-sec="outlook" ${isSecOpen('outlook') ? 'open' : ''}>
+    <summary class="section-label">Stock outlook · at current sales pace</summary>
+    <div class="card">
+      ${outlook.map(x => `
+        <div class="tc-row">
+          <div class="tc-name">${esc(x.p.name)}</div>
+          <div class="tc-track"><div class="tc-fill ${x.daysLeft < 14 ? 'cost' : ''}" style="width:${Math.max(4, Math.min(100, Math.round(x.daysLeft / 60 * 100)))}%"></div></div>
+          <div class="tc-amount">${x.p.stock === 0 ? 'out now' : '~' + Math.round(x.daysLeft) + ' days'}<div class="sub" style="font-weight:400;font-size:11px;color:var(--md-on-surface-variant)">sells ${x.p.unit === 'weight' ? fmtGrams(Math.round(x.perMonth)) : Math.round(x.perMonth)}/mo</div></div>
+        </div>`).join('')}
+      <div class="sub" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:6px">based on the last 90 days of sales — amber = under 2 weeks left</div>
+    </div>
+    </details>` : ''}
+    <details class="section" data-sec="activity" ${isSecOpen('activity') ? 'open' : ''}>
+    <summary class="section-label">Recent activity</summary>
     <div class="card">
       ${events.slice(0, 8).map(e => `
         <div class="activity-item">
@@ -425,7 +547,8 @@ async function renderDashboard() {
             <div class="when">${timeAgo(e.ts)}</div>
           </div>
         </div>`).join('') || '<div class="empty">No activity yet.</div>'}
-    </div>`;
+    </div>
+    </details>`;
 
   const seed = $('#seedBtn');
   if (seed) seed.onclick = seedSampleData;
@@ -433,6 +556,8 @@ async function renderDashboard() {
   if (lowCard) lowCard.onclick = () => { state.stockFilter = 'low'; switchView('inventory'); syncStockChips(); };
   document.querySelectorAll('#periodChips [data-period]').forEach(chip =>
     chip.addEventListener('click', () => { state.period = chip.dataset.period; state.periodOffset = 0; renderDashboard(); }));
+  document.querySelectorAll('#view-dashboard details[data-sec]').forEach(d =>
+    d.addEventListener('toggle', () => localStorage.setItem('erp_sec_' + d.dataset.sec, d.open ? '1' : '0')));
   const prev = $('#periodPrev'), next = $('#periodNext');
   if (prev) prev.onclick = () => { state.periodOffset--; renderDashboard(); };
   if (next) next.onclick = () => { if (state.periodOffset < 0) { state.periodOffset++; renderDashboard(); } };
@@ -448,7 +573,6 @@ function fmtStock(p) {
 // 'tracked' | 'made' (made to order, never stocked) | 'service' (e.g. Delivery)
 const stockMode = p => p.stockMode || (p.trackStock === false ? 'service' : 'tracked');
 const MODE_TAGS = { made: 'made to order', service: 'service' };
-const EDIT_ICON = '<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z"/></svg>';
 
 function stockBadge(p) {
   if (p.trackStock === false) return '';
@@ -481,7 +605,6 @@ async function renderProducts() {
               ? `<div class="big">∞</div><div class="sub">${MODE_TAGS[stockMode(p)]}</div>`
               : `<div class="big">${fmtStock(p)}</div><div class="sub">in stock</div>`}
           </div>
-          <button class="card-edit" data-edit title="Edit">${EDIT_ICON}</button>
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No products found</div><div>${products.length ? 'Try a different search or filter.' : 'Add your first product with the button below.'}</div></div>`;
@@ -493,10 +616,8 @@ async function renderProducts() {
       await DB.delete('products', p.id);
       snack('Product deleted'); render();
     });
-    const options = () => openItemOptions(p.name, { onEdit: () => openProductForm(p.id), onDelete: confirmDelete });
-    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); options(); });
     card.addEventListener('click', () => openProductForm(p.id));
-    attachLongPress(card, options);
+    attachLongPress(card, () => openItemOptions(p.name, { onEdit: () => openProductForm(p.id), onDelete: confirmDelete }));
   });
 }
 
@@ -517,10 +638,9 @@ async function renderPurchases() {
             <div class="sub">${cat(p)}${p.supplier ? ' · ' + esc(p.supplier) : ''} · ${fmtDate(p.receivedAt)}</div>
           </div>
           <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
-          <button class="card-edit" data-edit title="Edit">${EDIT_ICON}</button>
         </div>
       </div>
-    </div>`).join('') || `<div class="empty"><div class="title">No purchases found</div><div>${purchases.length ? 'Try a different category filter.' : 'Money spent on stock or materials will appear here.'}</div></div>`;
+    </div>`).join('') || `<div class="empty"><div class="title">No expenses found</div><div>${purchases.length ? 'Try a different category filter.' : 'Money you spend (stock, materials, equipment…) will appear here.'}</div></div>`;
 
   document.querySelectorAll('#purchaseList .swipe[data-puid]').forEach(wrap => {
     const p = purchases.find(x => x.id === Number(wrap.dataset.puid));
@@ -529,9 +649,9 @@ async function renderPurchases() {
       await DB.delete('purchases', p.id);
       snack('Purchase deleted'); render();
     });
-    const options = () => openItemOptions(p.description, { onEdit: () => openPurchaseForm(p), onDelete: confirmDelete });
-    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); options(); });
-    attachLongPress(card, options);
+    card.classList.add('is-tappable');
+    card.addEventListener('click', () => openPurchaseForm(p));
+    attachLongPress(card, () => openItemOptions(p.description, { onEdit: () => openPurchaseForm(p), onDelete: confirmDelete }));
   });
 
   // Prefill the log form's date with today
@@ -543,7 +663,7 @@ const CATEGORY_OPTIONS = ['Materials', 'Packaging', 'Equipment', 'Shipping', 'Ot
 /* Edit an existing expense entry. */
 function openPurchaseForm(p) {
   openSheet(`
-    <h2>Edit purchase</h2>
+    <h2>Edit expense</h2>
     <div class="form-card">
       <label class="field"><span>What did you buy</span><input id="peDescription" value="${esc(p.description)}"></label>
       <div class="field-row">
@@ -742,8 +862,10 @@ async function renderOrders() {
   let list = orders.filter(o =>
     o.customerName.toLowerCase().includes(q) ||
     String(o.id).includes(q) ||
+    orderNo(o).toLowerCase().includes(q) ||
     o.items.some(i => i.name.toLowerCase().includes(q)));
-  if (state.statusFilter !== 'all') list = list.filter(o => o.status === state.statusFilter);
+  if (state.statusFilter === 'open') list = list.filter(o => o.status !== 'Delivered');
+  else if (state.statusFilter !== 'all') list = list.filter(o => o.status === state.statusFilter);
   list.sort((a, b) => b.createdAt - a.createdAt);
 
   $('#orderList').innerHTML = list.map(o => {
@@ -754,37 +876,38 @@ async function renderOrders() {
       <div class="card">
       <div class="row">
         <div class="row-main">
-          <div class="name">#${o.id} · ${esc(o.customerName)}</div>
+          <div class="name">${orderNo(o)} · ${esc(o.customerName)}</div>
           <div class="sub">${esc(o.address)}</div>
           <div class="sub">${o.items.map(i => itemLabel(i)).join(', ')}</div>
           ${waiting.length ? `<span class="badge badge-low"><span class="dot"></span>Awaiting stock: ${waiting.map(i => itemLabel(i, i.pendingQty)).join(', ')}</span>` : ''}
         </div>
         <div class="row-end">
           <div class="big">${fmtMoney(o.total)}</div>
-          <div class="sub">${fmtDate(o.createdAt)}</div>
+          <div class="sub">${fmtDate(o.createdAt)} · ${fmtTime(o.createdAt)}</div>
           ${o.discountPct > 0 ? `<div class="sub">${o.discountPct}% discount</div>` : ''}
         </div>
-        <button class="card-edit" data-edit title="Options">${EDIT_ICON}</button>
       </div>
       ${railHTML(o)}
       </div>
     </div>`;
-  }).join('') || `<div class="empty"><div class="title">No orders found</div><div>${orders.length ? 'Try a different search or status filter.' : 'Create your first order with the button below.'}</div></div>`;
+  }).join('') || `<div class="empty"><div class="title">No orders found</div><div>${orders.length ? (state.statusFilter === 'open' ? 'All orders are delivered — tap “All” to see them.' : 'Try a different search or status filter.') : 'Create your first order with the button below.'}</div></div>`;
 
   document.querySelectorAll('#orderList .swipe[data-oid]').forEach(wrap => {
     const o = list.find(x => x.id === Number(wrap.dataset.oid));
     const card = wrap.querySelector('.card');
-    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); openOrderOptions(o); });
+    card.classList.add('is-tappable');
+    card.addEventListener('click', () => openOrderOptions(o));
     attachLongPress(card, () => openOrderOptions(o));
   });
 
   document.querySelectorAll('[data-advance]').forEach(btn =>
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
       const o = await DB.get('orders', Number(btn.dataset.advance));
       const next = STATUSES[STATUSES.indexOf(o.status) + 1];
       o.status = next; o.statusChangedAt = Date.now();
       await DB.put('orders', o);
-      snack(`Order #${o.id} → ${next}`);
+      snack(`${orderNo(o)} → ${next}`);
       render();
     }));
 }
@@ -851,10 +974,10 @@ async function shareReceipt(o) {
 function openOrderOptions(o) {
   const hasWeight = o.items.some(i => i.unitType === 'weight');
   openSheet(`
-    <h2>Order #${o.id} · ${esc(o.customerName)}</h2>
+    <h2>${orderNo(o)} · ${esc(o.customerName)}</h2>
     <div class="form-card">
       <button class="btn-tonal" id="ooShare">Share receipt</button>
-      <button class="btn-tonal" id="ooDate">Change order date</button>
+      <button class="btn-tonal" id="ooDate">Change order date & time</button>
       <button class="btn-tonal" id="ooNumber">Change order number</button>
       ${hasWeight ? '<button class="btn-tonal" id="ooWeights">Adjust sold weights</button>' : ''}
       <button class="btn-text danger" id="ooDelete">Delete order</button>
@@ -864,19 +987,22 @@ function openOrderOptions(o) {
 
   $('#ooDate').onclick = () => {
     openSheet(`
-      <h2>Change order date</h2>
+      <h2>Change order date & time</h2>
       <div class="form-card">
-        <label class="field"><span>Order date for #${o.id}</span>
-          <input type="date" id="odDate" value="${tsToDateInput(o.createdAt)}">
-        </label>
+        <div class="field-row">
+          <label class="field"><span>Date</span><input type="date" id="odDate" value="${tsToDateInput(o.createdAt)}"></label>
+          <label class="field"><span>Time</span><input type="time" id="odTime" value="${tsToTimeInput(o.createdAt)}"></label>
+        </div>
         <button class="btn-filled" id="odSave">Save</button>
       </div>`);
     $('#odSave').onclick = async () => {
-      const ts = dateInputToTs($('#odDate').value);
-      if (!ts) return snack('Pick a date');
-      o.createdAt = ts;
+      const dStr = $('#odDate').value, tStr = $('#odTime').value || '12:00';
+      if (!dStr) return snack('Pick a date');
+      const [y, m, d] = dStr.split('-').map(Number);
+      const [hh, mm] = tStr.split(':').map(Number);
+      o.createdAt = new Date(y, m - 1, d, hh, mm).getTime();
       await DB.put('orders', o);
-      closeSheet(); snack(`Order #${o.id} moved to ${fmtDate(ts)}`); render();
+      closeSheet(); snack(`Order moved to ${fmtDate(o.createdAt)} ${fmtTime(o.createdAt)}`); render();
     };
   };
 
@@ -884,7 +1010,7 @@ function openOrderOptions(o) {
     openSheet(`
       <h2>Change order number</h2>
       <div class="form-card">
-        <label class="field"><span>New number for order #${o.id}</span>
+        <label class="field"><span>New sequence number for ${orderNo(o)} (currently ${o.id})</span>
           <input type="number" id="onNew" min="1" inputmode="numeric" value="${o.id}">
         </label>
         <button class="btn-filled" id="onSave">Save</button>
@@ -895,7 +1021,7 @@ function openOrderOptions(o) {
       if (newId === o.id) return closeSheet();
       try {
         await DB.changeOrderId(o.id, newId);
-        closeSheet(); snack(`Order #${o.id} is now #${newId}`); render();
+        closeSheet(); snack(`Order is now ${orderNo({ id: newId, createdAt: o.createdAt })}`); render();
       } catch (err) { snack(err.message); }
     };
   };
@@ -925,15 +1051,15 @@ function openOrderOptions(o) {
       });
       if (bad) return snack('Weights must be greater than 0');
       await DB.updateOrderWeights(o.id, newQtys);
-      closeSheet(); snack(`Order #${o.id} updated — totals and stock adjusted`); render();
+      closeSheet(); snack(`${orderNo(o)} updated — totals and stock adjusted`); render();
     };
   };
 
   $('#ooDelete').onclick = () => {
     closeSheet();
-    showConfirm(`Delete order #${o.id} (${o.customerName}, ${fmtMoney(o.total)})? Stock is not restored.`, async () => {
+    showConfirm(`Delete order ${orderNo(o)} (${o.customerName}, ${fmtMoney(o.total)})? Stock is not restored.`, async () => {
       await DB.delete('orders', o.id);
-      snack(`Order #${o.id} deleted`); render();
+      snack(`${orderNo(o)} deleted`); render();
     });
   };
 }
@@ -971,7 +1097,10 @@ async function openOrderForm() {
         <label class="field"><span>Email (optional)</span><input id="ofEmail" type="email" inputmode="email" placeholder="name@example.com"></label>
       </div>
       <label class="field"><span>Delivery address</span><input id="ofAddress" placeholder="Street, city"></label>
-      <label class="field"><span>Order date</span><input type="date" id="ofDate"></label>
+      <div class="field-row">
+        <label class="field"><span>Order date</span><input type="date" id="ofDate"></label>
+        <label class="field"><span>Time</span><input type="time" id="ofTime"></label>
+      </div>
       <h2 class="section-label" style="margin:8px 0 0">Items</h2>
       <div id="ofLines"></div>
       <button class="btn-tonal" id="ofAddLine">＋ Add item</button>
@@ -1039,8 +1168,9 @@ async function openOrderForm() {
 
   $('#ofAddLine').onclick = () => { lines.push(newLine()); drawLines(); };
   $('#ofDiscount').addEventListener('input', updateTotal);
-  // Prefill order date with today (local time)
+  // Prefill order date & time with now (local time)
   $('#ofDate').value = tsToDateInput(Date.now());
+  $('#ofTime').value = tsToTimeInput(Date.now());
   $('#ofCustomer').onchange = async e => {
     const id = Number(e.target.value);
     $('#ofNewCustomer').hidden = !!id;
@@ -1083,10 +1213,12 @@ async function openOrderForm() {
       });
     if (!items.length) return snack('Add at least one item');
 
-    // Order date: today keeps the exact current time (so activity ordering
-    // stays natural); a backdated order is stored at noon local time.
-    const createdAt = dateInputToTs($('#ofDate').value);
-    if (!createdAt) return snack('Pick an order date');
+    // Order date & time as chosen in the form.
+    const dStr = $('#ofDate').value, tStr = $('#ofTime').value || '12:00';
+    if (!dStr) return snack('Pick an order date');
+    const [oy, om, od] = dStr.split('-').map(Number);
+    const [oh, omin] = tStr.split(':').map(Number);
+    const createdAt = new Date(oy, om - 1, od, oh, omin).getTime();
 
     const subtotal = items.reduce((s, i) => s + i.lineTotal, 0);
     const discountPct = Math.min(100, Math.max(0, Number($('#ofDiscount').value) || 0));
@@ -1104,9 +1236,9 @@ async function openOrderForm() {
       closeSheet();
       const waiting = order.items.filter(i => i.pendingQty > 0);
       if (waiting.length) {
-        snack(`Order #${orderId} created — awaiting stock: ${waiting.map(i => itemLabel(i, i.pendingQty)).join(', ')}`);
+        snack(`${orderNo({ id: orderId, createdAt: order.createdAt })} created — awaiting stock: ${waiting.map(i => itemLabel(i, i.pendingQty)).join(', ')}`);
       } else {
-        snack(`Order #${orderId} created — in production`);
+        snack(`${orderNo({ id: orderId, createdAt: order.createdAt })} created — in production`);
       }
       render();
     } catch (err) {
@@ -1158,7 +1290,6 @@ async function renderCustomers() {
             <div class="big">${fmtMoney(c.spent)}</div>
             <div class="sub">${c.orderCount} order${c.orderCount === 1 ? '' : 's'}</div>
           </div>
-          <button class="card-edit" data-edit title="Edit">${EDIT_ICON}</button>
         </div>
       </div>
     </div>`).join('') || `<div class="empty"><div class="title">No customers found</div><div>${customers.length ? 'Try a different search.' : 'Customers are added here or when you create an order.'}</div></div>`;
@@ -1170,10 +1301,8 @@ async function renderCustomers() {
       await DB.delete('customers', c.id);
       snack('Customer deleted'); render();
     });
-    const options = () => openItemOptions(c.name, { onEdit: () => openCustomerForm(c.id), onDelete: confirmDelete });
-    card.querySelector('[data-edit]').addEventListener('click', e => { e.stopPropagation(); options(); });
     card.addEventListener('click', () => openCustomerDetail(c.id));
-    attachLongPress(card, options);
+    attachLongPress(card, () => openItemOptions(c.name, { onEdit: () => openCustomerForm(c.id), onDelete: confirmDelete }));
   });
 }
 
@@ -1196,7 +1325,7 @@ async function openCustomerDetail(id) {
         <div class="card">
           <div class="row">
             <div class="row-main">
-              <div class="name">#${o.id} · ${fmtDate(o.createdAt)}</div>
+              <div class="name">${orderNo(o)} · ${fmtDate(o.createdAt)}</div>
               <div class="sub">${o.items.map(i => itemLabel(i)).join(', ')}</div>
               <div class="sub" style="font-weight:600;color:var(--md-primary)">${o.status}</div>
             </div>

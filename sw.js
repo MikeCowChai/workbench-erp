@@ -1,6 +1,6 @@
-/* Service worker — caches the entire app shell so Workbench ERP
+/* Service worker — caches the entire app shell so BuddyBoard
    runs with zero network. Bump CACHE version when files change. */
-const CACHE = 'workbench-erp-v17';
+const CACHE = 'buddyboard-v20';
 const SHELL = [
   './',
   './index.html',

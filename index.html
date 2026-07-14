@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#006A60">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Workbench ERP</title>
+<title>BuddyBoard</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -31,7 +31,7 @@
   <section class="view" id="view-inventory" hidden>
     <div class="seg-tabs" role="tablist">
       <button class="seg-tab is-active" data-invtab="stock" role="tab">Stock</button>
-      <button class="seg-tab" data-invtab="purchases" role="tab">Incoming purchases</button>
+      <button class="seg-tab" data-invtab="purchases" role="tab">Expenses</button>
     </div>
     <div id="inv-stock">
       <div class="search-field">
@@ -47,7 +47,7 @@
     </div>
     <div id="inv-purchases" hidden>
       <div class="card form-card">
-        <h2 class="card-title">Log a purchase</h2>
+        <h2 class="card-title">Log an expense</h2>
         <label class="field">
           <span>What did you buy</span>
           <input type="text" id="poDescription" placeholder="e.g. Sand 10kg">
@@ -78,9 +78,9 @@
             <input type="text" id="poSupplier" placeholder="e.g. Northline Supply">
           </label>
         </div>
-        <button class="btn-filled" id="poReceive">Log purchase</button>
+        <button class="btn-filled" id="poReceive">Log expense</button>
       </div>
-      <h2 class="section-label">Recent purchases</h2>
+      <h2 class="section-label">Recent expenses</h2>
       <div class="chip-row" id="purchaseChips">
         <button class="chip is-selected" data-pcat="all">All</button>
         <button class="chip" data-pcat="Materials">Materials</button>
@@ -100,7 +100,8 @@
       <input type="search" id="orderSearch" placeholder="Search orders or customers" autocomplete="off">
     </div>
     <div class="chip-row" id="statusChips">
-      <button class="chip is-selected" data-status="all">All</button>
+      <button class="chip is-selected" data-status="open">Open</button>
+      <button class="chip" data-status="all">All</button>
       <button class="chip" data-status="In production">In production</button>
       <button class="chip" data-status="Ready for shipping">Ready for shipping</button>
       <button class="chip" data-status="Completed">Completed</button>
