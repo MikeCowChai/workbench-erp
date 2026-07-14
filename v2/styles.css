@@ -404,6 +404,23 @@ details.section[open] > summary::before { transform: rotate(90deg); }
 .dialog-text { font-size: 15px; margin-bottom: 18px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 4px; }
 
+/* ---------- Profit split waterfall ---------- */
+.flow-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 9px 4px; font-size: 14.5px;
+}
+.flow-row.start { font-weight: 700; font-size: 16px; }
+.flow-row.minus { color: var(--md-tertiary); }
+.flow-row.sub {
+  border-top: 1px solid var(--md-outline-variant);
+  font-weight: 600;
+}
+.flow-row.share {
+  background: var(--md-primary-container); color: var(--md-on-primary-container);
+  border-radius: var(--radius-s); padding: 11px 12px; margin-top: 6px;
+  font-weight: 600;
+}
+
 /* ---------- Revenue chart ---------- */
 .chart { display: flex; align-items: flex-end; gap: 8px; height: 150px; padding-top: 8px; }
 .chart-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 5px; height: 100%; min-width: 0; }

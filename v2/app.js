@@ -311,7 +311,7 @@ async function render() {
   if (state.view === 'home') renderHome();
   if (state.view === 'orders') renderOrders();
   if (state.view === 'stock') { renderProducts(); renderStockOutlook(); }
-  if (state.view === 'money') { renderReports(); renderPurchases(); }
+  if (state.view === 'money') { renderReports(); renderSplit(); renderPurchases(); }
   if (state.view === 'customers') renderCustomers();
 }
 
@@ -576,6 +576,142 @@ async function renderReports() {
   const prev = $('#periodPrev'), next = $('#periodNext');
   if (prev) prev.onclick = () => { state.periodOffset--; renderReports(); };
   if (next) next.onclick = () => { if (state.periodOffset < 0) { state.periodOffset++; renderReports(); } };
+}
+
+/* ----- MONEY: profit split ----- */
+/* Waterfall: base (profit or revenue) → minus tax reserve % → minus buffer
+   reserve % → remainder split between two shares. All percentages and the
+   base are configurable and stored locally. Amounts always sum exactly:
+   each step rounds the set-aside and keeps the remainder intact. */
+const SPLIT_DEFAULTS = { base: 'profit', taxPct: 7, resPct: 2.5, sharePct: 60, name1: 'Share 1', name2: 'Share 2' };
+function splitCfg() {
+  try { return { ...SPLIT_DEFAULTS, ...JSON.parse(localStorage.getItem('erp_split_cfg') || '{}') }; }
+  catch { return { ...SPLIT_DEFAULTS }; }
+}
+
+async function renderSplit() {
+  const [orders, purchases] = await Promise.all([DB.getAll('orders'), DB.getAll('purchases')]);
+  const per = computePeriod();
+  const cfg = splitCfg();
+
+  const revenue = orders.filter(o => o.createdAt >= per.start && o.createdAt < per.end)
+    .reduce((s, o) => s + o.total, 0);
+  const costs = purchases.filter(pu => pu.receivedAt >= per.start && pu.receivedAt < per.end)
+    .reduce((s, pu) => s + (pu.amount || 0), 0);
+  const profit = revenue - costs;
+  const base = cfg.base === 'revenue' ? revenue : profit;
+
+  const tax = base > 0 ? Math.round(base * cfg.taxPct / 100) : 0;
+  const afterTax = base - tax;
+  const reserve = afterTax > 0 ? Math.round(afterTax * cfg.resPct / 100) : 0;
+  const toSplit = afterTax - reserve;
+  const share1 = toSplit > 0 ? Math.round(toSplit * cfg.sharePct / 100) : 0;
+  const share2 = toSplit > 0 ? toSplit - share1 : 0;
+  const fmtSigned = n => n < 0 ? '−' + fmtMoney(-n) : fmtMoney(n);
+
+  $('#money-split').innerHTML = `
+    <div class="chip-row" id="splitChips">
+      <button class="chip ${state.period === 'month' ? 'is-selected' : ''}" data-speriod="month">Month</button>
+      <button class="chip ${state.period === 'quarter' ? 'is-selected' : ''}" data-speriod="quarter">Quarter</button>
+      <button class="chip ${state.period === 'year' ? 'is-selected' : ''}" data-speriod="year">Year</button>
+    </div>
+    <div class="period-nav">
+      <button id="splitPrev" title="Previous">‹</button>
+      <span class="label">${per.label}</span>
+      <button id="splitNext" title="Next" ${per.off >= 0 ? 'disabled' : ''}>›</button>
+    </div>
+    <div class="card">
+      <div class="flow-row start">
+        <span>${cfg.base === 'revenue' ? 'Revenue' : 'Profit'} · ${per.label}</span>
+        <span>${fmtSigned(base)}</span>
+      </div>
+      <div class="flow-row minus">
+        <span>Tax reserve · ${cfg.taxPct}%</span>
+        <span>−${fmtMoney(tax)}</span>
+      </div>
+      <div class="flow-row sub">
+        <span>After tax</span>
+        <span>${fmtSigned(afterTax)}</span>
+      </div>
+      <div class="flow-row minus">
+        <span>Buffer reserve · ${cfg.resPct}%</span>
+        <span>−${fmtMoney(reserve)}</span>
+      </div>
+      <div class="flow-row sub">
+        <span>To distribute</span>
+        <span>${fmtSigned(toSplit)}</span>
+      </div>
+      <div class="flow-row share">
+        <span>${esc(cfg.name1)} · ${cfg.sharePct}%</span>
+        <span>${fmtMoney(share1)}</span>
+      </div>
+      <div class="flow-row share">
+        <span>${esc(cfg.name2)} · ${(100 - cfg.sharePct).toLocaleString(undefined, { maximumFractionDigits: 2 })}%</span>
+        <span>${fmtMoney(share2)}</span>
+      </div>
+    </div>
+    <div class="stat-grid" style="margin-top:12px">
+      <div class="stat-card warn">
+        <div class="label">Set aside · tax + buffer</div>
+        <div class="value">${fmtMoney(tax + reserve)}</div>
+        <div class="hint">park this before spending anything</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Payout total</div>
+        <div class="value">${fmtMoney(share1 + share2)}</div>
+        <div class="hint">${esc(cfg.name1)} ${fmtMoney(share1)} · ${esc(cfg.name2)} ${fmtMoney(share2)}</div>
+      </div>
+    </div>
+    ${base <= 0 ? '<div class="sub" style="font-size:13px;color:var(--md-on-surface-variant);margin-top:10px">No positive amount this period — nothing is set aside or distributed.</div>' : ''}
+    <button class="btn-tonal" id="splitSettings" style="margin-top:14px">Adjust percentages…</button>`;
+
+  document.querySelectorAll('#splitChips [data-speriod]').forEach(chip =>
+    chip.addEventListener('click', () => { state.period = chip.dataset.speriod; state.periodOffset = 0; renderSplit(); renderReports(); }));
+  $('#splitPrev').onclick = () => { state.periodOffset--; renderSplit(); renderReports(); };
+  $('#splitNext').onclick = () => { if (state.periodOffset < 0) { state.periodOffset++; renderSplit(); renderReports(); } };
+  $('#splitSettings').onclick = openSplitSettings;
+}
+
+function openSplitSettings() {
+  const cfg = splitCfg();
+  openSheet(`
+    <h2>Split settings</h2>
+    <div class="form-card">
+      <label class="field"><span>Base amount</span>
+        <select id="spBase">
+          <option value="profit" ${cfg.base === 'profit' ? 'selected' : ''}>Profit (revenue − costs)</option>
+          <option value="revenue" ${cfg.base === 'revenue' ? 'selected' : ''}>Revenue</option>
+        </select>
+      </label>
+      <div class="field-row">
+        <label class="field"><span>Tax reserve (%)</span>
+          <input id="spTax" type="number" min="0" max="100" step="0.1" inputmode="decimal" value="${cfg.taxPct}">
+        </label>
+        <label class="field"><span>Buffer reserve (%)</span>
+          <input id="spRes" type="number" min="0" max="100" step="0.1" inputmode="decimal" value="${cfg.resPct}">
+        </label>
+      </div>
+      <label class="field"><span>First share (%) — the rest goes to the second share</span>
+        <input id="spShare" type="number" min="0" max="100" step="0.5" inputmode="decimal" value="${cfg.sharePct}">
+      </label>
+      <div class="field-row">
+        <label class="field"><span>Name first share</span><input id="spName1" value="${esc(cfg.name1)}"></label>
+        <label class="field"><span>Name second share</span><input id="spName2" value="${esc(cfg.name2)}"></label>
+      </div>
+      <button class="btn-filled" id="spSave">Save</button>
+    </div>`);
+  $('#spSave').onclick = () => {
+    const clampPct = v => Math.min(100, Math.max(0, Number(v) || 0));
+    localStorage.setItem('erp_split_cfg', JSON.stringify({
+      base: $('#spBase').value,
+      taxPct: clampPct($('#spTax').value),
+      resPct: clampPct($('#spRes').value),
+      sharePct: clampPct($('#spShare').value),
+      name1: $('#spName1').value.trim() || 'Share 1',
+      name2: $('#spName2').value.trim() || 'Share 2'
+    }));
+    closeSheet(); snack('Split settings saved'); renderSplit();
+  };
 }
 
 /* ----- STOCK: outlook (moved from dashboard) ----- */
@@ -1458,6 +1594,7 @@ document.querySelectorAll('[data-moneytab]').forEach(tab =>
     state.moneyTab = tab.dataset.moneytab;
     document.querySelectorAll('[data-moneytab]').forEach(t => t.classList.toggle('is-active', t === tab));
     $('#money-reports').hidden = state.moneyTab !== 'reports';
+    $('#money-split').hidden = state.moneyTab !== 'split';
     $('#money-expenses').hidden = state.moneyTab !== 'expenses';
     $('#fab').hidden = true; // money view has no FAB
   }));

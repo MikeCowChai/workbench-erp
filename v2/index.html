@@ -59,13 +59,15 @@
     <div id="productList" class="card-list"></div>
   </section>
 
-  <!-- Money (Expenses + financial reports) -->
+  <!-- Money (Expenses + financial reports + profit split) -->
   <section class="view" id="view-money" hidden>
     <div class="seg-tabs" role="tablist">
       <button class="seg-tab is-active" data-moneytab="reports" role="tab">Reports</button>
+      <button class="seg-tab" data-moneytab="split" role="tab">Split</button>
       <button class="seg-tab" data-moneytab="expenses" role="tab">Expenses</button>
     </div>
     <div id="money-reports"></div>
+    <div id="money-split" hidden></div>
     <div id="money-expenses" hidden>
       <div class="card form-card">
         <h2 class="card-title">Log an expense</h2>
