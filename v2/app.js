@@ -78,46 +78,93 @@ function applyTheme(pref) {
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if ((localStorage.getItem('erp_theme') || 'auto') === 'auto') applyTheme('auto');
 });
-$('#themeBtn').addEventListener('click', () => {
-  const cur = localStorage.getItem('erp_theme') || 'auto';
-  const footer = localStorage.getItem('erp_receipt_footer') || '';
+/* ---------------- Settings (sectioned) ---------------- */
+const THEME_LABELS = { auto: 'System (auto)', light: 'Light', dark: 'Dark' };
+
+function openSettings() {
+  const theme = localStorage.getItem('erp_theme') || 'auto';
+  const bank = bankCfg();
   openSheet(`
     <h2>Settings</h2>
-    <h2 class="section-label" style="margin-top:0">Theme</h2>
-    <div class="chip-row">
-      <button class="chip ${cur === 'auto' ? 'is-selected' : ''}" data-theme-pick="auto">System (auto)</button>
-      <button class="chip ${cur === 'light' ? 'is-selected' : ''}" data-theme-pick="light">Light</button>
-      <button class="chip ${cur === 'dark' ? 'is-selected' : ''}" data-theme-pick="dark">Dark</button>
+
+    <h2 class="section-label" style="margin-top:0">Appearance</h2>
+    <div class="card set-card">
+      <div class="set-row">
+        <div class="set-main"><div class="set-title">Theme</div></div>
+        <div class="chip-row" style="padding:0;margin:0">
+          <button class="chip ${theme === 'auto' ? 'is-selected' : ''}" data-theme-pick="auto">Auto</button>
+          <button class="chip ${theme === 'light' ? 'is-selected' : ''}" data-theme-pick="light">Light</button>
+          <button class="chip ${theme === 'dark' ? 'is-selected' : ''}" data-theme-pick="dark">Dark</button>
+        </div>
+      </div>
     </div>
-    <h2 class="section-label">Receipt footer</h2>
-    <div class="form-card">
-      <label class="field"><span>Shown at the bottom of every shared receipt (name, bank account…)</span>
-        <textarea id="stFooter" rows="4" placeholder="Name:&#10;Your name&#10;Accountnumber SCB 1234567890">${esc(footer)}</textarea>
-      </label>
-      <button class="btn-filled" id="stSave">Save settings</button>
+
+    <h2 class="section-label">Finance</h2>
+    <div class="card set-card">
+      <button class="set-row" id="setBank">
+        <div class="set-main">
+          <div class="set-title">Bank balance</div>
+          <div class="set-sub">${bank ? 'baseline set ' + fmtDate(bank.ts) : 'not set up yet'}</div>
+        </div>
+        <span class="set-chevron">›</span>
+      </button>
+      <button class="set-row" id="setSplit">
+        <div class="set-main">
+          <div class="set-title">Profit split percentages</div>
+          <div class="set-sub">tax, buffer and share distribution</div>
+        </div>
+        <span class="set-chevron">›</span>
+      </button>
     </div>
-    <h2 class="section-label">Backup</h2>
-    <div class="form-card">
-      <button class="btn-tonal" id="stExport">Export all data (JSON)</button>
-      <button class="btn-tonal" id="stImport">Import backup…</button>
+
+    <h2 class="section-label">Receipts</h2>
+    <div class="card set-card">
+      <button class="set-row" id="setFooter">
+        <div class="set-main">
+          <div class="set-title">Receipt footer</div>
+          <div class="set-sub">${(localStorage.getItem('erp_receipt_footer') || '').trim() ? 'configured' : 'name & bank account for receipts'}</div>
+        </div>
+        <span class="set-chevron">›</span>
+      </button>
+    </div>
+
+    <h2 class="section-label">Data & backup</h2>
+    <div class="card set-card">
+      <button class="set-row" id="stExport">
+        <div class="set-main">
+          <div class="set-title">Export all data</div>
+          <div class="set-sub">share or save a JSON backup</div>
+        </div>
+        <span class="set-chevron">›</span>
+      </button>
+      <button class="set-row" id="stImport">
+        <div class="set-main">
+          <div class="set-title">Import backup…</div>
+          <div class="set-sub">replaces everything in this app</div>
+        </div>
+        <span class="set-chevron">›</span>
+      </button>
       <input type="file" id="stImportFile" accept=".json,application/json" hidden>
-      <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant)">Your data lives only on this device. Export a backup regularly and keep it somewhere safe (Drive, email to yourself). Importing replaces everything.</div>
-    </div>`);
+    </div>
+    <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant);margin-top:10px;padding:0 4px">Your data lives only on this device — export a backup regularly and keep it somewhere safe.</div>`);
+
   document.querySelectorAll('[data-theme-pick]').forEach(c =>
     c.addEventListener('click', () => {
       applyTheme(c.dataset.themePick);
       document.querySelectorAll('[data-theme-pick]').forEach(x => x.classList.toggle('is-selected', x === c));
     }));
-  $('#stSave').onclick = () => {
-    localStorage.setItem('erp_receipt_footer', $('#stFooter').value);
-    closeSheet(); snack('Settings saved');
-  };
+
+  $('#setBank').onclick = () => openBankSheet();
+  $('#setSplit').onclick = () => openSplitSettings();
+  $('#setFooter').onclick = () => openFooterSheet();
 
   $('#stExport').onclick = async () => {
     const data = await DB.exportAll();
     data.settings = {
       theme: localStorage.getItem('erp_theme') || 'auto',
-      receiptFooter: localStorage.getItem('erp_receipt_footer') || ''
+      receiptFooter: localStorage.getItem('erp_receipt_footer') || '',
+      splitCfg: localStorage.getItem('erp_split_cfg') || '',
+      bank: localStorage.getItem('erp_bank') || ''
     };
     const name = `buddyboard-backup-${tsToDateInput(Date.now())}.json`;
     const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
@@ -150,6 +197,8 @@ $('#themeBtn').addEventListener('click', () => {
         if (data.settings) {
           if (data.settings.theme) applyTheme(data.settings.theme);
           if (data.settings.receiptFooter != null) localStorage.setItem('erp_receipt_footer', data.settings.receiptFooter);
+          if (data.settings.splitCfg) localStorage.setItem('erp_split_cfg', data.settings.splitCfg);
+          if (data.settings.bank) localStorage.setItem('erp_bank', data.settings.bank);
         }
         localStorage.setItem('erp_delivery_seeded', '1');
         closeSheet(); snack('Backup imported'); render();
@@ -157,7 +206,25 @@ $('#themeBtn').addEventListener('click', () => {
       'Import'
     );
   };
-});
+}
+
+function openFooterSheet() {
+  const footer = localStorage.getItem('erp_receipt_footer') || '';
+  openSheet(`
+    <h2>Receipt footer</h2>
+    <div class="form-card">
+      <label class="field"><span>Shown at the bottom of every shared receipt (name, bank account…)</span>
+        <textarea id="stFooter" rows="4" placeholder="Name:&#10;Your name&#10;Accountnumber SCB 1234567890">${esc(footer)}</textarea>
+      </label>
+      <button class="btn-filled" id="stFooterSave">Save</button>
+    </div>`);
+  $('#stFooterSave').onclick = () => {
+    localStorage.setItem('erp_receipt_footer', $('#stFooter').value);
+    closeSheet(); snack('Receipt footer saved');
+  };
+}
+
+$('#themeBtn').addEventListener('click', openSettings);
 applyTheme(localStorage.getItem('erp_theme') || 'auto');
 
 /* ---------------- Navigation ---------------- */
@@ -188,6 +255,16 @@ function switchView(view) {
 
 document.querySelectorAll('.nav-item').forEach(b =>
   b.addEventListener('click', () => switchView(b.dataset.view)));
+
+/* Jump to a specific Money sub-tab from elsewhere (e.g. Home cards). */
+function setMoneyTab(name) {
+  state.moneyTab = name;
+  document.querySelectorAll('[data-moneytab]').forEach(t => t.classList.toggle('is-active', t.dataset.moneytab === name));
+  $('#money-reports').hidden = name !== 'reports';
+  $('#money-bank').hidden = name !== 'bank';
+  $('#money-split').hidden = name !== 'split';
+  $('#money-expenses').hidden = name !== 'expenses';
+}
 
 /* ---------------- Sheet (modal) ---------------- */
 function openSheet(html) {
@@ -311,7 +388,7 @@ async function render() {
   if (state.view === 'home') renderHome();
   if (state.view === 'orders') renderOrders();
   if (state.view === 'stock') { renderProducts(); renderStockOutlook(); }
-  if (state.view === 'money') { renderReports(); renderSplit(); renderPurchases(); }
+  if (state.view === 'money') { renderReports(); renderBank(); renderSplit(); renderPurchases(); }
   if (state.view === 'customers') renderCustomers();
 }
 
@@ -375,6 +452,15 @@ async function renderHome() {
   const outOfStock = products.filter(p => p.trackStock !== false && p.stock === 0).length;
   const awaiting = orders.filter(o => o.items.some(i => i.pendingQty > 0)).length;
 
+  // Live bank balance (only when tracking is set up).
+  const bank = bankCfg();
+  let bankBalance = null;
+  if (bank) {
+    const inflow = orders.filter(o => o.createdAt >= bank.ts).reduce((s, o) => s + o.total, 0);
+    const outflow = purchases.filter(p => p.receivedAt >= bank.ts).reduce((s, p) => s + (p.amount || 0), 0);
+    bankBalance = bank.amount + inflow - outflow;
+  }
+
   // Recent activity, kept on home as the quick "what happened" glance.
   const events = [];
   orders.forEach(o => {
@@ -402,6 +488,12 @@ async function renderHome() {
         <div class="value">${completed}</div>
         <div class="hint">completed, awaiting delivery</div>
       </div>
+      ${bankBalance !== null ? `
+      <div class="stat-card tappable" data-goto="money" data-moneysub="bank" style="grid-column:1/-1">
+        <div class="label">Bank balance (tracked)</div>
+        <div class="value">${bankBalance < 0 ? '−' + fmtMoney(-bankBalance) : fmtMoney(bankBalance)}</div>
+        <div class="hint">tap for movements & re-anchor</div>
+      </div>` : ''}
       ${(lowStock + outOfStock) ? `
       <div class="stat-card warn tappable" data-goto="stock" data-stock="low" style="grid-column:1/-1">
         <div class="label">Stock alerts</div>
@@ -437,6 +529,7 @@ async function renderHome() {
     card.addEventListener('click', () => {
       if (card.dataset.status) state.statusFilter = card.dataset.status;
       if (card.dataset.stock) { state.stockFilter = card.dataset.stock; }
+      if (card.dataset.moneysub) setMoneyTab(card.dataset.moneysub);
       switchView(card.dataset.goto);
       if (card.dataset.status) syncStatusChips();
       if (card.dataset.stock) syncStockChips();
@@ -711,6 +804,99 @@ function openSplitSettings() {
       name2: $('#spName2').value.trim() || 'Share 2'
     }));
     closeSheet(); snack('Split settings saved'); renderSplit();
+  };
+}
+
+/* ----- MONEY: bank balance ----- */
+/* The user anchors a real balance at a moment in time. From then on the
+   app tracks it live: baseline + order revenue since − expenses since.
+   Drift (private spending, fees) is fixed by simply re-anchoring. */
+function bankCfg() {
+  try { return JSON.parse(localStorage.getItem('erp_bank')) || null; } catch { return null; }
+}
+async function computeBank() {
+  const cfg = bankCfg();
+  if (!cfg) return null;
+  const [orders, purchases] = await Promise.all([DB.getAll('orders'), DB.getAll('purchases')]);
+  const inflow = orders.filter(o => o.createdAt >= cfg.ts).reduce((s, o) => s + o.total, 0);
+  const outflow = purchases.filter(p => p.receivedAt >= cfg.ts).reduce((s, p) => s + (p.amount || 0), 0);
+  return { cfg, inflow, outflow, balance: cfg.amount + inflow - outflow, orders, purchases };
+}
+
+async function renderBank() {
+  const data = await computeBank();
+  if (!data) {
+    $('#money-bank').innerHTML = `
+      <div class="empty">
+        <div class="title">Track your bank balance</div>
+        <div>Set your current balance once — every order and expense you log will then move it automatically.</div>
+        <button class="btn-tonal" id="bankSetup">Set current balance</button>
+      </div>`;
+    $('#bankSetup').onclick = () => openBankSheet();
+    return;
+  }
+
+  const { cfg, inflow, outflow, balance, orders, purchases } = data;
+  // Ledger: everything that moved the balance since the baseline.
+  const moves = [];
+  orders.forEach(o => { if (o.createdAt >= cfg.ts) moves.push({ ts: o.createdAt, text: `${orderNo(o)} — ${esc(o.customerName)}`, amt: o.total }); });
+  purchases.forEach(p => { if (p.receivedAt >= cfg.ts) moves.push({ ts: p.receivedAt, text: esc(p.description), amt: -(p.amount || 0) }); });
+  moves.sort((a, b) => b.ts - a.ts);
+
+  $('#money-bank').innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card hero">
+        <div class="label">Bank balance (tracked)</div>
+        <div class="value">${balance < 0 ? '−' + fmtMoney(-balance) : fmtMoney(balance)}</div>
+        <div class="hint">baseline ${fmtMoney(cfg.amount)} set ${fmtDate(cfg.ts)} ${fmtTime(cfg.ts)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">In since baseline</div>
+        <div class="value">${fmtMoney(inflow)}</div>
+        <div class="hint">orders</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Out since baseline</div>
+        <div class="value">${fmtMoney(outflow)}</div>
+        <div class="hint">expenses</div>
+      </div>
+    </div>
+    <button class="btn-tonal" id="bankUpdate" style="margin-top:12px">Update balance…</button>
+    <h2 class="section-label">Movements since baseline</h2>
+    <div class="card">
+      ${moves.slice(0, 15).map(m => `
+        <div class="flow-row" style="padding:8px 4px">
+          <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.text}<span style="color:var(--md-on-surface-variant);font-size:12px"> · ${fmtDate(m.ts)}</span></span>
+          <span style="flex:none;font-weight:600;${m.amt >= 0 ? 'color:var(--md-primary)' : 'color:var(--md-tertiary)'}">${m.amt >= 0 ? '+' : '−'}${fmtMoney(Math.abs(m.amt))}</span>
+        </div>`).join('') || '<div class="empty">Nothing has moved the balance yet.</div>'}
+    </div>
+    <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant);margin-top:10px;padding:0 4px">Doesn't match your real bank? Private spending and fees aren't tracked here — just tap “Update balance” and re-enter the real number to re-anchor.</div>`;
+
+  $('#bankUpdate').onclick = () => openBankSheet(balance);
+}
+
+function openBankSheet(prefill) {
+  const cfg = bankCfg();
+  openSheet(`
+    <h2>${cfg ? 'Update bank balance' : 'Set bank balance'}</h2>
+    <div class="form-card">
+      <label class="field"><span>Current balance (฿) — check your banking app and copy it here</span>
+        <input id="bkAmount" type="number" step="1" inputmode="numeric" value="${prefill !== undefined ? Math.round(prefill) : (cfg ? cfg.amount : '')}" placeholder="e.g. 45000">
+      </label>
+      <button class="btn-filled" id="bkSave">${cfg ? 'Re-anchor from now' : 'Start tracking'}</button>
+      ${cfg ? '<button class="btn-text danger" id="bkStop">Stop tracking balance</button>' : ''}
+      <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant)">From this moment, every order adds to this number and every expense subtracts from it. Orders and expenses dated before now don't affect it.</div>
+    </div>`);
+  $('#bkSave').onclick = () => {
+    const amount = Number($('#bkAmount').value);
+    if (!Number.isFinite(amount)) return snack('Enter your current balance');
+    localStorage.setItem('erp_bank', JSON.stringify({ amount: Math.round(amount), ts: Date.now() }));
+    closeSheet(); snack('Bank balance anchored'); render();
+  };
+  const stop = $('#bkStop');
+  if (stop) stop.onclick = () => {
+    localStorage.removeItem('erp_bank');
+    closeSheet(); snack('Balance tracking stopped'); render();
   };
 }
 
@@ -1594,6 +1780,7 @@ document.querySelectorAll('[data-moneytab]').forEach(tab =>
     state.moneyTab = tab.dataset.moneytab;
     document.querySelectorAll('[data-moneytab]').forEach(t => t.classList.toggle('is-active', t === tab));
     $('#money-reports').hidden = state.moneyTab !== 'reports';
+    $('#money-bank').hidden = state.moneyTab !== 'bank';
     $('#money-split').hidden = state.moneyTab !== 'split';
     $('#money-expenses').hidden = state.moneyTab !== 'expenses';
     $('#fab').hidden = true; // money view has no FAB
