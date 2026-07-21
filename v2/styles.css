@@ -435,6 +435,10 @@ details.section[open] > summary::before { transform: rotate(90deg); }
 .combo-item:active { background: var(--md-surface-container-highest); }
 .combo-item .sub { font-size: 12px; color: var(--md-on-surface-variant); margin-top: 1px; }
 .combo-new { color: var(--md-primary); font-weight: 600; }
+.combo-notice {
+  font-size: 13px; font-weight: 600; color: var(--md-primary);
+  margin: -2px 0 8px; padding: 0 2px;
+}
 
 /* ---------- Settings rows ---------- */
 .set-card { padding: 4px 16px; }

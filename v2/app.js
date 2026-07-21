@@ -1558,14 +1558,15 @@ async function shareReceipt(o) {
 /* Compact searchable customer picker: replaces the native <select>, whose
    OS popup covers the whole screen once the customer list grows. Renders a
    small scrollable dropdown under the field instead. */
-function attachCustomerPicker({ input, drop, customers, allowNew, onPick, onType }) {
+function attachCustomerPicker({ input, drop, customers, allowNew, onPick, onType, onNew }) {
   const render = () => {
     const t = input.value.trim().toLowerCase();
     const hits = customers
       .filter(c => !t || c.name.toLowerCase().includes(t) || (c.phone || '').includes(t))
       .slice(0, 6);
+    const exact = customers.some(c => c.name.toLowerCase() === t);
     drop.innerHTML =
-      (allowNew ? `<div class="combo-item combo-new" data-new>＋ New customer${t ? ` “${esc(input.value.trim())}”` : ''}</div>` : '') +
+      (allowNew && t && !exact ? `<div class="combo-item combo-new" data-new>＋ Create “${esc(input.value.trim())}” as new customer</div>` : '') +
       hits.map(c => `<div class="combo-item" data-cid="${c.id}"><div>${esc(c.name)}</div>${c.phone ? `<div class="sub">${esc(c.phone)}</div>` : ''}</div>`).join('') +
       (!hits.length && !allowNew ? '<div class="combo-item" style="color:var(--md-on-surface-variant)">No matching customers</div>' : '');
     drop.hidden = false;
@@ -1583,6 +1584,7 @@ function attachCustomerPicker({ input, drop, customers, allowNew, onPick, onType
       drop.hidden = true;
       input.blur();
       if (onType) onType(input.value.trim());
+      if (onNew) onNew(input.value.trim());
     });
   };
   input.addEventListener('focus', render);
@@ -1858,12 +1860,12 @@ async function openOrderForm() {
         <input id="ofCustomerSearch" placeholder="Search customers, or type a new name" autocomplete="off">
         <div class="combo-drop" id="ofCustomerDrop" hidden></div>
       </label>
-      <div id="ofNewCustomer">
+      <div id="ofNewCustomer" hidden>
+        <div class="combo-notice" id="ofNewNotice"></div>
         <div class="field-row">
-          <label class="field"><span>Customer name</span><input id="ofName" placeholder="Full name"></label>
           <label class="field"><span>Phone number</span><input id="ofPhone" type="tel" inputmode="tel" placeholder="08x-xxx-xxxx"></label>
+          <label class="field"><span>Email (optional)</span><input id="ofEmail" type="email" inputmode="email" placeholder="name@example.com"></label>
         </div>
-        <label class="field"><span>Email (optional)</span><input id="ofEmail" type="email" inputmode="email" placeholder="name@example.com"></label>
       </div>
       <label class="field"><span>Delivery address</span><input id="ofAddress" placeholder="Street, city"></label>
       <div class="field-row">
@@ -1940,7 +1942,7 @@ async function openOrderForm() {
   // Prefill order date & time with now (local time)
   $('#ofDate').value = tsToDateInput(Date.now());
   $('#ofTime').value = tsToTimeInput(Date.now());
-  let pickedCustomer = null; // null = creating a new customer
+  let pickedCustomer = null; // null = the typed name may become a new customer
   attachCustomerPicker({
     input: $('#ofCustomerSearch'),
     drop: $('#ofCustomerDrop'),
@@ -1952,28 +1954,42 @@ async function openOrderForm() {
     },
     onType: name => {
       pickedCustomer = null;
-      $('#ofNewCustomer').hidden = false;
-      $('#ofName').value = name; // typed name doubles as the new customer's name
-    }
+      // Typed something that isn't an existing name → this becomes a new
+      // customer, no extra tap needed. The search field IS the name field.
+      const exact = customers.find(c => c.name.toLowerCase() === name.toLowerCase());
+      const isNew = name && !exact;
+      $('#ofNewCustomer').hidden = !isNew;
+      if (isNew) $('#ofNewNotice').textContent = `＋ “${name}” will be added as a new customer`;
+    },
+    onNew: () => $('#ofPhone').focus()
   });
 
   $('#ofCreate').onclick = async () => {
-    let customerId = pickedCustomer ? pickedCustomer.id : null;
-    let customerName;
+    const typed = $('#ofCustomerSearch').value.trim();
     const address = $('#ofAddress').value.trim();
     if (!address) return snack('Enter a delivery address');
 
-    if (customerId) {
+    let customerId, customerName;
+    if (pickedCustomer && typed === pickedCustomer.name) {
+      customerId = pickedCustomer.id;
       customerName = pickedCustomer.name;
     } else {
-      customerName = $('#ofName').value.trim();
-      const phone = $('#ofPhone').value.trim();
-      if (!customerName) return snack('Enter the customer name');
-      if (!phone) return snack('Enter a phone number');
-      customerId = await DB.add('customers', {
-        name: customerName, phone, email: $('#ofEmail').value.trim(),
-        address, createdAt: Date.now()
-      });
+      if (!typed) return snack('Enter or pick a customer');
+      // Typed exactly an existing name without tapping it? Use that customer
+      // instead of creating a duplicate.
+      const exact = customers.find(c => c.name.toLowerCase() === typed.toLowerCase());
+      if (exact) {
+        customerId = exact.id;
+        customerName = exact.name;
+      } else {
+        const phone = $('#ofPhone').value.trim();
+        if (!phone) return snack('Enter a phone number for the new customer');
+        customerName = typed;
+        customerId = await DB.add('customers', {
+          name: customerName, phone, email: $('#ofEmail').value.trim(),
+          address, createdAt: Date.now()
+        });
+      }
     }
 
     const items = lines
