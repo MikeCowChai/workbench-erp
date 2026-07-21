@@ -43,8 +43,48 @@ const fmtTime = ts => {
 };
 const tsToTimeInput = ts => fmtTime(ts);
 /* Order number format: DNBB + 2-digit year of the order date + 4-digit
-   sequence, e.g. order #7 placed in 2026 → DNBB260007. */
-const orderNo = o => `DNBB${String(new Date(o.createdAt).getFullYear()).slice(-2)}${String(o.id).padStart(4, '0')}`;
+   sequence. IMPORTANT: this uses order.seq, a number BuddyBoard assigns
+   and manages itself — never the database's internal id/key. The internal
+   id is IndexedDB's auto-increment key and must never be shown or edited:
+   IndexedDB permanently raises its key generator to match the highest key
+   ever used, so editing it (even once, even by mistake) can make every
+   later order jump to a huge number. seq has no such trap — it's just a
+   number in a field, safe to reassign freely. */
+const orderNo = o => `DNBB${String(new Date(o.createdAt).getFullYear()).slice(-2)}${String(o.seq ?? o.id).padStart(4, '0')}`;
+
+/* One-time self-heal: assigns clean sequential seq numbers (1, 2, 3…) to
+   every order by creation date, and fixes the counter. Runs once ever;
+   also exposed as a manual "Renumber orders" tool for later cleanup. */
+async function renumberAllOrders() {
+  const orders = await DB.getAll('orders');
+  orders.sort((a, b) => a.createdAt - b.createdAt || a.id - b.id);
+  let seq = 1;
+  for (const o of orders) {
+    if (o.seq !== seq) { o.seq = seq; await DB.put('orders', o); }
+    seq++;
+  }
+  localStorage.setItem('erp_order_seq_next', String(seq));
+  return orders.length;
+}
+/* Gentle self-heal, safe to run at every boot AND after every import:
+   - any order missing a seq (e.g. imported from a v1 backup) gets the next
+     free number, oldest first
+   - the counter is forced past the highest seq in use
+   User-chosen numbers are never touched; full clean-up stays available via
+   Settings → Renumber orders. */
+async function ensureOrderSeq() {
+  const orders = await DB.getAll('orders');
+  let maxSeq = 0;
+  orders.forEach(o => { if (Number.isFinite(o.seq)) maxSeq = Math.max(maxSeq, o.seq); });
+  const missing = orders.filter(o => !Number.isFinite(o.seq))
+    .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id);
+  for (const o of missing) {
+    o.seq = ++maxSeq;
+    await DB.put('orders', o);
+  }
+  const next = Number(localStorage.getItem('erp_order_seq_next') || '1');
+  if (next <= maxSeq) localStorage.setItem('erp_order_seq_next', String(maxSeq + 1));
+}
 const tsToDateInput = ts => {
   const d = new Date(ts);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -145,6 +185,13 @@ function openSettings() {
         <span class="set-chevron">›</span>
       </button>
       <input type="file" id="stImportFile" accept=".json,application/json" hidden>
+      <button class="set-row" id="stRenumber">
+        <div class="set-main">
+          <div class="set-title">Renumber orders</div>
+          <div class="set-sub">clean up order numbers into 1, 2, 3… by date</div>
+        </div>
+        <span class="set-chevron">›</span>
+      </button>
     </div>
     <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant);margin-top:10px;padding:0 4px">Your data lives only on this device — export a backup regularly and keep it somewhere safe.</div>`);
 
@@ -157,6 +204,13 @@ function openSettings() {
   $('#setBank').onclick = () => openBankSheet();
   $('#setSplit').onclick = () => openSplitSettings();
   $('#setFooter').onclick = () => openFooterSheet();
+  $('#stRenumber').onclick = () => {
+    showConfirm(
+      'Renumber all orders into a clean 1, 2, 3… sequence, ordered by their order date? This changes the DNBB number shown on every order.',
+      async () => { const n = await renumberAllOrders(); snack(`Renumbered ${n} orders`); render(); },
+      'Renumber'
+    );
+  };
 
   $('#stExport').onclick = async () => {
     const data = await DB.exportAll();
@@ -194,6 +248,7 @@ function openSettings() {
       `Import backup from ${when} (${(data.orders || []).length} orders, ${(data.products || []).length} products)? This REPLACES everything currently in the app.`,
       async () => {
         await DB.importAll(data);
+        await ensureOrderSeq(); // v1 backups have no seq numbers — assign them now
         if (data.settings) {
           if (data.settings.theme) applyTheme(data.settings.theme);
           if (data.settings.receiptFooter != null) localStorage.setItem('erp_receipt_footer', data.settings.receiptFooter);
@@ -457,7 +512,7 @@ async function renderHome() {
   let bankBalance = null;
   if (bank) {
     const inflow = orders.filter(o => o.createdAt >= bank.ts).reduce((s, o) => s + o.total, 0);
-    const outflow = purchases.filter(p => p.receivedAt >= bank.ts).reduce((s, p) => s + (p.amount || 0), 0);
+    const outflow = purchases.filter(p => p.receivedAt >= bank.ts && hitsBank(p)).reduce((s, p) => s + (p.amount || 0), 0);
     bankBalance = bank.amount + inflow - outflow;
   }
 
@@ -807,6 +862,15 @@ function openSplitSettings() {
   };
 }
 
+/* Who paid an expense. 'company' (default for old records) hits the bank
+   immediately; a person fronting money only hits the bank once reimbursed. */
+const paidByLabel = pb => {
+  const cfg = splitCfg();
+  return pb === 'p1' ? cfg.name1 : pb === 'p2' ? cfg.name2 : 'Company';
+};
+const isPersonal = p => p.paidBy === 'p1' || p.paidBy === 'p2';
+const hitsBank = p => !isPersonal(p) || p.reimbursed;
+
 /* ----- MONEY: bank balance ----- */
 /* The user anchors a real balance at a moment in time. From then on the
    app tracks it live: baseline + order revenue since − expenses since.
@@ -819,7 +883,7 @@ async function computeBank() {
   if (!cfg) return null;
   const [orders, purchases] = await Promise.all([DB.getAll('orders'), DB.getAll('purchases')]);
   const inflow = orders.filter(o => o.createdAt >= cfg.ts).reduce((s, o) => s + o.total, 0);
-  const outflow = purchases.filter(p => p.receivedAt >= cfg.ts).reduce((s, p) => s + (p.amount || 0), 0);
+  const outflow = purchases.filter(p => p.receivedAt >= cfg.ts && hitsBank(p)).reduce((s, p) => s + (p.amount || 0), 0);
   return { cfg, inflow, outflow, balance: cfg.amount + inflow - outflow, orders, purchases };
 }
 
@@ -840,7 +904,7 @@ async function renderBank() {
   // Ledger: everything that moved the balance since the baseline.
   const moves = [];
   orders.forEach(o => { if (o.createdAt >= cfg.ts) moves.push({ ts: o.createdAt, text: `${orderNo(o)} — ${esc(o.customerName)}`, amt: o.total }); });
-  purchases.forEach(p => { if (p.receivedAt >= cfg.ts) moves.push({ ts: p.receivedAt, text: esc(p.description), amt: -(p.amount || 0) }); });
+  purchases.forEach(p => { if (p.receivedAt >= cfg.ts && hitsBank(p)) moves.push({ ts: p.receivedAt, text: esc(p.description) + (isPersonal(p) ? ' (reimbursed)' : ''), amt: -(p.amount || 0) }); });
   moves.sort((a, b) => b.ts - a.ts);
 
   $('#money-bank').innerHTML = `
@@ -870,7 +934,7 @@ async function renderBank() {
           <span style="flex:none;font-weight:600;${m.amt >= 0 ? 'color:var(--md-primary)' : 'color:var(--md-tertiary)'}">${m.amt >= 0 ? '+' : '−'}${fmtMoney(Math.abs(m.amt))}</span>
         </div>`).join('') || '<div class="empty">Nothing has moved the balance yet.</div>'}
     </div>
-    <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant);margin-top:10px;padding:0 4px">Doesn't match your real bank? Private spending and fees aren't tracked here — just tap “Update balance” and re-enter the real number to re-anchor.</div>`;
+    <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant);margin-top:10px;padding:0 4px">Doesn't match your real bank? Private spending and fees aren't tracked here, and expenses fronted personally only count once marked reimbursed — just tap “Update balance” and re-enter the real number to re-anchor.</div>`;
 
   $('#bankUpdate').onclick = () => openBankSheet(balance);
 }
@@ -990,7 +1054,19 @@ async function renderProducts() {
       snack('Product deleted'); render();
     });
     card.addEventListener('click', () => openProductForm(p.id));
-    attachLongPress(card, () => openItemOptions(p.name, { onEdit: () => openProductForm(p.id), onDelete: confirmDelete }));
+    attachLongPress(card, () => {
+      openSheet(`
+        <h2>${esc(p.name)}</h2>
+        <div class="form-card">
+          ${p.trackStock !== false ? '<button class="btn-tonal" id="ioAddStock">Add stock…</button>' : ''}
+          <button class="btn-tonal" id="ioEdit">Edit</button>
+          <button class="btn-text danger" id="ioDelete">Delete</button>
+        </div>`);
+      const a = $('#ioAddStock');
+      if (a) a.onclick = () => openAddStockSheet(p);
+      $('#ioEdit').onclick = () => { closeSheet(); openProductForm(p.id); };
+      $('#ioDelete').onclick = () => { closeSheet(); confirmDelete(); };
+    });
   });
 }
 
@@ -999,32 +1075,74 @@ async function renderPurchases() {
   const purchases = await DB.getAll('purchases');
   purchases.sort((a, b) => b.receivedAt - a.receivedAt);
   const cat = p => p.category || 'Other';
-  const list = state.purchaseFilter === 'all' ? purchases : purchases.filter(p => cat(p) === state.purchaseFilter);
+  const cfg = splitCfg();
+
+  // Keep the "Paid by" dropdown labels in sync with the split names.
+  const sel = $('#poPaidBy');
+  if (sel) {
+    const cur = sel.value || 'company';
+    sel.innerHTML = `<option value="company">Company</option><option value="p1">${esc(cfg.name1)}</option><option value="p2">${esc(cfg.name2)}</option>`;
+    sel.value = cur;
+  }
+
+  // Outstanding reimbursements per person.
+  const owed = { p1: 0, p2: 0 };
+  purchases.forEach(p => { if (isPersonal(p) && !p.reimbursed) owed[p.paidBy] += (p.amount || 0); });
+  const owedTotal = owed.p1 + owed.p2;
+  $('#owedCard').innerHTML = owedTotal > 0 ? `
+    <div class="card" style="margin-top:12px;background:var(--md-tertiary-container);color:var(--md-on-tertiary-container)">
+      <div style="font-weight:600;margin-bottom:4px">Outstanding reimbursements · ${fmtMoney(owedTotal)}</div>
+      ${owed.p1 > 0 ? `<div class="row" style="font-size:14px"><span>${esc(cfg.name1)} fronted</span><span style="font-weight:600">${fmtMoney(owed.p1)}</span></div>` : ''}
+      ${owed.p2 > 0 ? `<div class="row" style="font-size:14px"><span>${esc(cfg.name2)} fronted</span><span style="font-weight:600">${fmtMoney(owed.p2)}</span></div>` : ''}
+      <div style="font-size:12px;opacity:.8;margin-top:6px">long-press an expense to mark it reimbursed</div>
+    </div>` : '';
+
+  let list = purchases;
+  if (state.purchaseFilter === '__owed') list = purchases.filter(p => isPersonal(p) && !p.reimbursed);
+  else if (state.purchaseFilter !== 'all') list = purchases.filter(p => cat(p) === state.purchaseFilter);
 
   $('#purchaseList').innerHTML = list.slice(0, 50).map(p => `
     <div class="swipe" data-puid="${p.id}">
-      ${SWIPE_PANES}
-      <div class="card">
+      <div class="card is-tappable">
         <div class="row">
           <div class="row-main">
             <div class="name">${esc(p.description)}</div>
             <div class="sub">${cat(p)}${p.supplier ? ' · ' + esc(p.supplier) : ''} · ${fmtDate(p.receivedAt)}</div>
+            ${isPersonal(p) ? (p.reimbursed
+              ? `<span class="badge badge-ok"><span class="dot"></span>Paid by ${esc(paidByLabel(p.paidBy))} · reimbursed</span>`
+              : `<span class="badge badge-low"><span class="dot"></span>Paid by ${esc(paidByLabel(p.paidBy))} · not reimbursed</span>`) : ''}
           </div>
           <div class="row-end"><div class="big">${fmtMoney(p.amount)}</div></div>
         </div>
       </div>
-    </div>`).join('') || `<div class="empty"><div class="title">No expenses found</div><div>${purchases.length ? 'Try a different category filter.' : 'Money you spend (stock, materials, equipment…) will appear here.'}</div></div>`;
+    </div>`).join('') || `<div class="empty"><div class="title">No expenses found</div><div>${purchases.length ? 'Try a different filter.' : 'Money you spend (stock, materials, equipment…) will appear here.'}</div></div>`;
 
   document.querySelectorAll('#purchaseList .swipe[data-puid]').forEach(wrap => {
     const p = purchases.find(x => x.id === Number(wrap.dataset.puid));
     const card = wrap.querySelector('.card');
-    const confirmDelete = () => showConfirm(`Delete purchase “${p.description}” (${fmtMoney(p.amount)})?`, async () => {
+    const confirmDelete = () => showConfirm(`Delete expense “${p.description}” (${fmtMoney(p.amount)})?`, async () => {
       await DB.delete('purchases', p.id);
-      snack('Purchase deleted'); render();
+      snack('Expense deleted'); render();
     });
-    card.classList.add('is-tappable');
     card.addEventListener('click', () => openPurchaseForm(p));
-    attachLongPress(card, () => openItemOptions(p.description, { onEdit: () => openPurchaseForm(p), onDelete: confirmDelete }));
+    attachLongPress(card, () => {
+      const canReimburse = isPersonal(p) && !p.reimbursed;
+      openSheet(`
+        <h2>${esc(p.description)}</h2>
+        <div class="form-card">
+          ${canReimburse ? '<button class="btn-tonal" id="ioReimburse">Mark as reimbursed</button>' : ''}
+          <button class="btn-tonal" id="ioEdit">Edit</button>
+          <button class="btn-text danger" id="ioDelete">Delete</button>
+        </div>`);
+      const r = $('#ioReimburse');
+      if (r) r.onclick = async () => {
+        p.reimbursed = true;
+        await DB.put('purchases', p);
+        closeSheet(); snack(`Reimbursed — ${paidByLabel(p.paidBy)} is paid back ${fmtMoney(p.amount)}`); render();
+      };
+      $('#ioEdit').onclick = () => { closeSheet(); openPurchaseForm(p); };
+      $('#ioDelete').onclick = () => { closeSheet(); confirmDelete(); };
+    });
   });
 
   // Prefill the log form's date with today
@@ -1035,6 +1153,8 @@ const CATEGORY_OPTIONS = ['Materials', 'Packaging', 'Equipment', 'Shipping', 'Ot
 
 /* Edit an existing expense entry. */
 function openPurchaseForm(p) {
+  const cfg = splitCfg();
+  const pb = p.paidBy || 'company';
   openSheet(`
     <h2>Edit expense</h2>
     <div class="form-card">
@@ -1047,10 +1167,22 @@ function openPurchaseForm(p) {
       </div>
       <div class="field-row">
         <label class="field"><span>Date</span><input type="date" id="peDate" value="${tsToDateInput(p.receivedAt)}"></label>
-        <label class="field"><span>Supplier (optional)</span><input id="peSupplier" value="${esc(p.supplier || '')}"></label>
+        <label class="field"><span>Paid by</span>
+          <select id="pePaidBy">
+            <option value="company" ${pb === 'company' ? 'selected' : ''}>Company</option>
+            <option value="p1" ${pb === 'p1' ? 'selected' : ''}>${esc(cfg.name1)}</option>
+            <option value="p2" ${pb === 'p2' ? 'selected' : ''}>${esc(cfg.name2)}</option>
+          </select>
+        </label>
       </div>
+      <label class="field-checkbox" id="peReimburseWrap" ${pb === 'company' ? 'hidden' : ''}>
+        <input type="checkbox" id="peReimbursed" ${p.reimbursed ? 'checked' : ''}>
+        <span>Reimbursed — the company has paid this person back</span>
+      </label>
+      <label class="field"><span>Supplier (optional)</span><input id="peSupplier" value="${esc(p.supplier || '')}"></label>
       <button class="btn-filled" id="peSave">Save changes</button>
     </div>`);
+  $('#pePaidBy').onchange = e => { $('#peReimburseWrap').hidden = e.target.value === 'company'; };
   $('#peSave').onclick = async () => {
     const description = $('#peDescription').value.trim();
     const amount = Number($('#peAmount').value);
@@ -1058,8 +1190,13 @@ function openPurchaseForm(p) {
     if (!description) return snack('Enter what you bought');
     if (!(amount > 0)) return snack('Enter an amount greater than 0');
     if (!ts) return snack('Pick a date');
-    await DB.put('purchases', { ...p, description, amount, category: $('#peCategory').value, supplier: $('#peSupplier').value.trim(), receivedAt: ts });
-    closeSheet(); snack('Purchase updated'); render();
+    const paidBy = $('#pePaidBy').value;
+    await DB.put('purchases', {
+      ...p, description, amount, category: $('#peCategory').value,
+      paidBy, reimbursed: paidBy === 'company' ? false : $('#peReimbursed').checked,
+      supplier: $('#peSupplier').value.trim(), receivedAt: ts
+    });
+    closeSheet(); snack('Expense updated'); render();
   };
 }
 
@@ -1071,17 +1208,58 @@ $('#poReceive').addEventListener('click', async () => {
   if (!(amount > 0)) return snack('Enter an amount greater than 0');
   if (!ts) return snack('Pick a date');
 
+  const paidBy = $('#poPaidBy').value;
   await DB.add('purchases', {
     description, amount,
     category: $('#poCategory').value,
+    paidBy, reimbursed: false,
     supplier: $('#poSupplier').value.trim(),
     receivedAt: ts
   });
   $('#poDescription').value = ''; $('#poAmount').value = ''; $('#poSupplier').value = '';
   $('#poDate').value = tsToDateInput(Date.now());
-  snack(`Logged ${fmtMoney(amount)} — ${description}`);
+  snack(paidBy === 'company'
+    ? `Logged ${fmtMoney(amount)} — ${description}`
+    : `Logged ${fmtMoney(amount)} — fronted by ${paidByLabel(paidBy)} (not reimbursed yet)`);
   render();
 });
+
+
+/* Quick stock receipt: enter how much CAME IN, not the new total. */
+function openAddStockSheet(p) {
+  const isW = p.unit === 'weight';
+  openSheet(`
+    <h2>Add stock — ${esc(p.name)}</h2>
+    <div class="form-card">
+      <div class="sub" style="color:var(--md-on-surface-variant);margin-top:-8px">Currently ${fmtStock(p)} in stock. Enter what's being added.</div>
+      ${isW ? `
+      <div class="field-row">
+        <label class="field"><span>Quantity to add</span><input id="asQty" type="number" min="0.001" step="0.001" inputmode="decimal" value="1"></label>
+        <label class="field"><span>Unit</span><select id="asUnit"><option value="kg" selected>kg</option><option value="g">g</option></select></label>
+      </div>` : `
+      <label class="field"><span>Pieces to add</span><input id="asQty" type="number" min="1" inputmode="numeric" value="1"></label>`}
+      <button class="btn-filled" id="asSave">Add to stock</button>
+    </div>`);
+  $('#asSave').onclick = async () => {
+    const raw = Number($('#asQty').value);
+    if (!(raw > 0)) return snack('Enter a quantity greater than 0');
+    const grams = isW ? ($('#asUnit').value === 'kg' ? Math.round(raw * 1000) : Math.round(raw)) : raw;
+    const fresh = await DB.get('products', p.id);
+    fresh.stock += grams;
+    await DB.put('products', fresh);
+    // New stock first goes to orders that were waiting for it.
+    let allocMsg = '';
+    const allocations = await DB.allocatePending(p.id);
+    if (allocations.length) {
+      const total = allocations.reduce((s, a) => s + a.qty, 0);
+      allocMsg = ` — ${isW ? fmtGrams(total) : total + ' unit' + (total === 1 ? '' : 's')} went to waiting orders`;
+    }
+    const after = await DB.get('products', p.id);
+    closeSheet();
+    snack(`Added ${isW ? fmtGrams(grams) : grams + '×'} ${fresh.name} (now ${fmtStock(after)})${allocMsg}`);
+    render();
+  };
+}
 
 /* ----- Product form ----- */
 async function openProductForm(id) {
@@ -1239,7 +1417,7 @@ async function renderOrders() {
   const q = state.search.order.toLowerCase();
   let list = orders.filter(o =>
     o.customerName.toLowerCase().includes(q) ||
-    String(o.id).includes(q) ||
+    String(o.seq ?? o.id).includes(q) ||
     orderNo(o).toLowerCase().includes(q) ||
     o.items.some(i => i.name.toLowerCase().includes(q)));
   if (state.statusFilter === 'open') list = list.filter(o => o.status !== 'Delivered');
@@ -1348,12 +1526,149 @@ async function shareReceipt(o) {
   }
 }
 
+/* ----- Order edit (customer, address, items, discount) ----- */
+async function openOrderEdit(o) {
+  const [products, customers] = await Promise.all([DB.getAll('products'), DB.getAll('customers')]);
+  if (!products.length) return snack('No products available');
+  products.sort((a, b) => a.name.localeCompare(b.name));
+
+  const isWeight = p => p.unit === 'weight';
+  const newLine = (p = products[0]) => ({
+    productId: p.id,
+    qty: isWeight(p) ? 1000 : 1,
+    unitPrice: p.price,
+    weightBased: isWeight(p)
+  });
+
+  // Start from the order's current items; skip items whose product was
+  // deleted since (we can't reprice or restock those sensibly).
+  let dropped = 0;
+  let lines = o.items.map(i => {
+    if (!products.find(p => p.id === i.productId)) { dropped++; return null; }
+    return { productId: i.productId, qty: i.qty, unitPrice: i.unitPrice, weightBased: i.unitType === 'weight' };
+  }).filter(Boolean);
+  if (!lines.length) lines = [newLine()];
+  if (dropped) snack(`${dropped} item(s) reference a deleted product and were left out`);
+
+  const productOptions = sel => products.map(p =>
+    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} (${p.trackStock === false ? MODE_TAGS[stockMode(p)] : fmtStock(p) + ' left'})</option>`).join('');
+
+  openSheet(`
+    <h2>Edit ${orderNo(o)}</h2>
+    <div class="form-card">
+      <label class="field"><span>Customer</span>
+        <select id="oeCustomer">${customers.map(c => `<option value="${c.id}" ${c.id === o.customerId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      </label>
+      <label class="field"><span>Delivery address</span><input id="oeAddress" value="${esc(o.address)}"></label>
+      <h2 class="section-label" style="margin:8px 0 0">Items</h2>
+      <div id="oeLines"></div>
+      <button class="btn-tonal" id="oeAddLine">＋ Add item</button>
+      <label class="field" style="margin-top:4px"><span>Discount (%)</span>
+        <input id="oeDiscount" type="number" min="0" max="100" step="0.5" inputmode="decimal" value="${o.discountPct || 0}">
+      </label>
+      <div id="oeTotals"></div>
+      <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant)">${o.skipStock ? 'This order was created without touching stock — edits leave stock alone too.' : 'Stock is adjusted automatically: removed items go back, added items are taken (or marked awaiting).'}</div>
+      <button class="btn-filled" id="oeSave">Save changes</button>
+    </div>`);
+
+  const linesEl = $('#oeLines');
+
+  function drawLines() {
+    linesEl.innerHTML = lines.map((l, i) => l.weightBased ? `
+      <div class="line-item" style="margin-bottom:2px">
+        <label class="field"><span>Product</span><select data-li="${i}" data-k="productId">${productOptions(l.productId)}</select></label>
+        <label class="field"><span>Weight (g)</span><input data-li="${i}" data-k="qty" type="number" min="1" inputmode="numeric" value="${l.qty}"></label>
+        <label class="field"><span>฿ / kg</span><input data-li="${i}" data-k="unitPrice" type="number" min="0" step="1" inputmode="numeric" value="${l.unitPrice}"></label>
+        <button class="remove" data-rm="${i}" title="Remove item">✕</button>
+      </div>
+      <div class="line-hint" style="margin-bottom:10px">= ${fmtMoney(lineTotal(l))} (${fmtGrams(l.qty || 0)} at ${fmtMoney(l.unitPrice || 0)}/kg, rounded down)</div>` : `
+      <div class="line-item" style="margin-bottom:10px">
+        <label class="field"><span>Product</span><select data-li="${i}" data-k="productId">${productOptions(l.productId)}</select></label>
+        <label class="field"><span>Qty</span><input data-li="${i}" data-k="qty" type="number" min="1" inputmode="numeric" value="${l.qty}"></label>
+        <label class="field"><span>Unit price (฿)</span><input data-li="${i}" data-k="unitPrice" type="number" min="0" step="1" inputmode="numeric" value="${l.unitPrice}"></label>
+        <button class="remove" data-rm="${i}" title="Remove item">✕</button>
+      </div>`).join('');
+
+    linesEl.querySelectorAll('[data-li]').forEach(el => el.addEventListener('input', () => {
+      const i = Number(el.dataset.li), k = el.dataset.k;
+      lines[i][k] = Number(el.value);
+      if (k === 'productId') {
+        const p = products.find(p => p.id === lines[i].productId);
+        lines[i] = newLine(p);
+        drawLines();
+      } else if (lines[i].weightBased) {
+        const hint = el.closest('.line-item').nextElementSibling;
+        if (hint) hint.textContent = `= ${fmtMoney(lineTotal(lines[i]))} (${fmtGrams(lines[i].qty || 0)} at ${fmtMoney(lines[i].unitPrice || 0)}/kg, rounded down)`;
+      }
+      updateTotal();
+    }));
+    linesEl.querySelectorAll('[data-rm]').forEach(el => el.addEventListener('click', () => {
+      lines.splice(Number(el.dataset.rm), 1);
+      if (!lines.length) lines = [newLine()];
+      drawLines(); updateTotal();
+    }));
+    updateTotal();
+  }
+  function updateTotal() {
+    const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
+    const pct = Math.min(100, Math.max(0, Number($('#oeDiscount').value) || 0));
+    const discount = Math.ceil(subtotal * pct / 100);
+    const total = subtotal - discount;
+    $('#oeTotals').innerHTML = pct > 0 ? `
+      <div class="order-total" style="font-weight:400;font-size:14px;color:var(--md-on-surface-variant)"><span>Subtotal</span><span>${fmtMoney(subtotal)}</span></div>
+      <div class="order-total" style="font-weight:400;font-size:14px;color:var(--md-on-surface-variant)"><span>Discount ${pct}%</span><span>−${fmtMoney(discount)}</span></div>
+      <div class="order-total"><span>Total</span><span>${fmtMoney(total)}</span></div>` : `
+      <div class="order-total"><span>Total</span><span>${fmtMoney(total)}</span></div>`;
+  }
+
+  $('#oeAddLine').onclick = () => { lines.push(newLine()); drawLines(); };
+  $('#oeDiscount').addEventListener('input', updateTotal);
+  $('#oeCustomer').onchange = e => {
+    const c = customers.find(c => c.id === Number(e.target.value));
+    if (c && c.address) $('#oeAddress').value = c.address;
+  };
+  drawLines();
+
+  $('#oeSave').onclick = async () => {
+    const customerId = Number($('#oeCustomer').value);
+    const customer = customers.find(c => c.id === customerId);
+    if (!customer) return snack('Pick a customer');
+    const address = $('#oeAddress').value.trim();
+    if (!address) return snack('Enter a delivery address');
+
+    const items = lines
+      .filter(l => l.qty > 0)
+      .map(l => {
+        const p = products.find(p => p.id === l.productId);
+        return {
+          productId: p.id, name: p.name,
+          qty: l.qty, unitPrice: l.unitPrice,
+          unitType: l.weightBased ? 'weight' : 'pcs',
+          excludeReports: !!p.excludeReports,
+          lineTotal: lineTotal(l)
+        };
+      });
+    if (!items.length) return snack('Add at least one item');
+
+    const subtotal = items.reduce((s, i) => s + i.lineTotal, 0);
+    const discountPct = Math.min(100, Math.max(0, Number($('#oeDiscount').value) || 0));
+    const total = subtotal - Math.ceil(subtotal * discountPct / 100);
+
+    await DB.updateOrderItems(o.id, {
+      customerId, customerName: customer.name, address,
+      items, subtotal, discountPct, total
+    });
+    closeSheet(); snack(`${orderNo(o)} updated`); render();
+  };
+}
+
 /* ----- Order options (long-press / swipe-edit) ----- */
 function openOrderOptions(o) {
   const hasWeight = o.items.some(i => i.unitType === 'weight');
   openSheet(`
     <h2>${orderNo(o)} · ${esc(o.customerName)}</h2>
     <div class="form-card">
+      <button class="btn-tonal" id="ooEdit">Edit order…</button>
       <button class="btn-tonal" id="ooShare">Share receipt</button>
       <button class="btn-tonal" id="ooDate">Change order date & time</button>
       <button class="btn-tonal" id="ooNumber">Change order number</button>
@@ -1361,6 +1676,7 @@ function openOrderOptions(o) {
       <button class="btn-text danger" id="ooDelete">Delete order</button>
     </div>`);
 
+  $('#ooEdit').onclick = () => openOrderEdit(o);
   $('#ooShare').onclick = () => shareReceipt(o);
 
   $('#ooDate').onclick = () => {
@@ -1388,19 +1704,20 @@ function openOrderOptions(o) {
     openSheet(`
       <h2>Change order number</h2>
       <div class="form-card">
-        <label class="field"><span>New sequence number for ${orderNo(o)} (currently ${o.id})</span>
-          <input type="number" id="onNew" min="1" inputmode="numeric" value="${o.id}">
+        <label class="field"><span>New sequence number for ${orderNo(o)}</span>
+          <input type="number" id="onNew" min="1" inputmode="numeric" value="${o.seq ?? o.id}">
         </label>
         <button class="btn-filled" id="onSave">Save</button>
       </div>`);
     $('#onSave').onclick = async () => {
-      const newId = Number($('#onNew').value);
-      if (!(newId >= 1)) return snack('Enter a number of 1 or higher');
-      if (newId === o.id) return closeSheet();
-      try {
-        await DB.changeOrderId(o.id, newId);
-        closeSheet(); snack(`Order is now ${orderNo({ id: newId, createdAt: o.createdAt })}`); render();
-      } catch (err) { snack(err.message); }
+      const newSeq = Number($('#onNew').value);
+      if (!(newSeq >= 1)) return snack('Enter a number of 1 or higher');
+      if (newSeq === o.seq) return closeSheet();
+      const all = await DB.getAll('orders');
+      if (all.some(x => x.id !== o.id && x.seq === newSeq)) return snack(`Order number ${newSeq} is already in use`);
+      o.seq = newSeq;
+      await DB.put('orders', o);
+      closeSheet(); snack(`Order is now ${orderNo(o)}`); render();
     };
   };
 
@@ -1606,18 +1923,20 @@ async function openOrderForm() {
       customerId, customerName, address, items,
       subtotal, discountPct,
       total: subtotal - discount,
-      status: STATUSES[0], createdAt, statusChangedAt: null
+      status: STATUSES[0], createdAt, statusChangedAt: null,
+      seq: Number(localStorage.getItem('erp_order_seq_next') || '1')
     };
 
     try {
       const deduct = $('#ofDeduct').checked;
       const orderId = await DB.createOrderWithStock(order, deduct);
+      localStorage.setItem('erp_order_seq_next', String(order.seq + 1)); // commit the number only on success
       closeSheet();
       const waiting = order.items.filter(i => i.pendingQty > 0);
       if (waiting.length) {
-        snack(`${orderNo({ id: orderId, createdAt: order.createdAt })} created — awaiting stock: ${waiting.map(i => itemLabel(i, i.pendingQty)).join(', ')}`);
+        snack(`${orderNo(order)} created — awaiting stock: ${waiting.map(i => itemLabel(i, i.pendingQty)).join(', ')}`);
       } else {
-        snack(`${orderNo({ id: orderId, createdAt: order.createdAt })} created — in production`);
+        snack(`${orderNo(order)} created — in production`);
       }
       render();
     } catch (err) {
@@ -1845,4 +2164,4 @@ if ('serviceWorker' in navigator) {
 }
 
 /* ---------------- Boot ---------------- */
-ensureDeliveryProduct().then(() => switchView('home'));
+Promise.all([ensureDeliveryProduct(), ensureOrderSeq()]).then(() => switchView('home'));

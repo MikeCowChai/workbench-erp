@@ -99,15 +99,25 @@
             <input type="date" id="poDate">
           </label>
           <label class="field">
-            <span>Supplier (optional)</span>
-            <input type="text" id="poSupplier" placeholder="e.g. Northline Supply">
+            <span>Paid by</span>
+            <select id="poPaidBy">
+              <option value="company">Company</option>
+              <option value="p1">Person 1</option>
+              <option value="p2">Person 2</option>
+            </select>
           </label>
         </div>
+        <label class="field">
+          <span>Supplier (optional)</span>
+          <input type="text" id="poSupplier" placeholder="e.g. Northline Supply">
+        </label>
         <button class="btn-filled" id="poReceive">Log expense</button>
       </div>
+      <div id="owedCard"></div>
       <h2 class="section-label">Recent expenses</h2>
       <div class="chip-row" id="purchaseChips">
         <button class="chip is-selected" data-pcat="all">All</button>
+        <button class="chip" data-pcat="__owed">Not reimbursed</button>
         <button class="chip" data-pcat="Materials">Materials</button>
         <button class="chip" data-pcat="Packaging">Packaging</button>
         <button class="chip" data-pcat="Equipment">Equipment</button>

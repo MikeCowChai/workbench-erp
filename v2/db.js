@@ -200,21 +200,61 @@ const DB = (() => {
       });
     },
 
-    /* Atomic: give an order a different number. Fails if the number is taken. */
-    async changeOrderId(oldId, newId) {
+    /* NOTE: order renumbering no longer touches the internal id/key —
+       see orderNo() and the "Change order number" flow in app.js, which
+       just update order.seq via a plain put(). Directly reassigning an
+       IndexedDB key (as an earlier version of this function did) is
+       dangerous: the store's key generator permanently jumps to match
+       the highest key ever used, so a single typo could make every
+       future order get a huge id. Removed for that reason. */
+
+    /* Atomic: replace an order's items/customer/totals. Stock handling:
+       first give back what the OLD items actually took (qty minus what was
+       still pending), then deduct for the NEW items — shortfalls become
+       pendingQty again, exactly like order creation. Orders created with
+       "don't deduct stock" (skipStock) keep not touching stock at all. */
+    async updateOrderItems(orderId, patch) {
       const db = await open();
       return new Promise((resolve, reject) => {
-        const t = db.transaction('orders', 'readwrite');
-        const s = t.objectStore('orders');
-        s.get(newId).onsuccess = e => {
-          if (e.target.result) { t.abort(); reject(new Error(`Order #${newId} already exists`)); return; }
-          s.get(oldId).onsuccess = e2 => {
-            const o = e2.target.result;
-            if (!o) { t.abort(); reject(new Error('Order not found')); return; }
-            o.id = newId;
-            s.add(o);
-            s.delete(oldId);
-          };
+        const t = db.transaction(['orders', 'products'], 'readwrite');
+        const oS = t.objectStore('orders');
+        const pS = t.objectStore('products');
+        oS.get(orderId).onsuccess = e => {
+          const o = e.target.result;
+          if (!o) { t.abort(); reject(new Error('Order not found')); return; }
+          const skip = !!o.skipStock;
+
+          // What the old items actually removed from stock, per product.
+          const giveBack = new Map();
+          if (!skip) o.items.forEach(i => {
+            const took = i.qty - (i.pendingQty || 0);
+            if (took > 0) giveBack.set(i.productId, (giveBack.get(i.productId) || 0) + took);
+          });
+
+          Object.assign(o, patch);
+
+          const productIds = new Set([...giveBack.keys(), ...o.items.map(i => i.productId)]);
+          let pending = productIds.size;
+          if (pending === 0) { oS.put(o); return; }
+          productIds.forEach(pid => {
+            pS.get(pid).onsuccess = ev => {
+              const p = ev.target.result;
+              const mine = o.items.filter(i => i.productId === pid);
+              if (p && p.trackStock !== false && !skip) {
+                p.stock += (giveBack.get(pid) || 0);
+                mine.forEach(i => {
+                  const take = Math.min(p.stock, i.qty);
+                  p.stock -= take;
+                  i.pendingQty = i.qty - take;
+                });
+                pS.put(p);
+              } else {
+                mine.forEach(i => { i.pendingQty = 0; });
+                if (p && p.trackStock !== false && skip === false) pS.put(p);
+              }
+              if (--pending === 0) oS.put(o);
+            };
+          });
         };
         t.oncomplete = () => resolve();
         t.onerror = () => reject(t.error);
