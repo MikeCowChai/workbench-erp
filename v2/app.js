@@ -344,6 +344,35 @@ function closeSheet() {
   $('#scrim').hidden = true;
 }
 $('#scrim').addEventListener('click', closeSheet);
+$('#sheetClose').addEventListener('click', closeSheet);
+
+/* The handle strip is a guaranteed dismiss zone: dragging it down always
+   closes the sheet, regardless of where the content is scrolled. */
+(function enableHandleDrag() {
+  const sheet = $('#sheet');
+  const handle = $('#sheetHandle');
+  let startY = 0, dy = 0, active = false;
+  handle.addEventListener('touchstart', e => {
+    active = true; dy = 0;
+    startY = e.touches[0].clientY;
+    sheet.style.transition = 'none';
+  }, { passive: true });
+  handle.addEventListener('touchmove', e => {
+    if (!active) return;
+    e.preventDefault();
+    dy = e.touches[0].clientY - startY;
+    sheet.style.transform = `translateY(${Math.max(0, dy)}px)`;
+  }, { passive: false });
+  const end = () => {
+    if (!active) return;
+    active = false;
+    sheet.style.transition = 'transform .2s ease';
+    if (dy > 90) closeSheet();
+    else sheet.style.transform = '';
+  };
+  handle.addEventListener('touchend', end);
+  handle.addEventListener('touchcancel', end);
+})();
 
 /* Swipe down to dismiss the sheet. Non-passive touchmove lets us take over
    from native scrolling; drag only engages when content is at the top. */
@@ -1526,6 +1555,41 @@ async function shareReceipt(o) {
   }
 }
 
+/* Compact searchable customer picker: replaces the native <select>, whose
+   OS popup covers the whole screen once the customer list grows. Renders a
+   small scrollable dropdown under the field instead. */
+function attachCustomerPicker({ input, drop, customers, allowNew, onPick, onType }) {
+  const render = () => {
+    const t = input.value.trim().toLowerCase();
+    const hits = customers
+      .filter(c => !t || c.name.toLowerCase().includes(t) || (c.phone || '').includes(t))
+      .slice(0, 6);
+    drop.innerHTML =
+      (allowNew ? `<div class="combo-item combo-new" data-new>＋ New customer${t ? ` “${esc(input.value.trim())}”` : ''}</div>` : '') +
+      hits.map(c => `<div class="combo-item" data-cid="${c.id}"><div>${esc(c.name)}</div>${c.phone ? `<div class="sub">${esc(c.phone)}</div>` : ''}</div>`).join('') +
+      (!hits.length && !allowNew ? '<div class="combo-item" style="color:var(--md-on-surface-variant)">No matching customers</div>' : '');
+    drop.hidden = false;
+    drop.querySelectorAll('[data-cid]').forEach(el => el.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      const c = customers.find(x => x.id === Number(el.dataset.cid));
+      input.value = c.name;
+      drop.hidden = true;
+      input.blur();
+      onPick(c);
+    }));
+    const n = drop.querySelector('[data-new]');
+    if (n) n.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      drop.hidden = true;
+      input.blur();
+      if (onType) onType(input.value.trim());
+    });
+  };
+  input.addEventListener('focus', render);
+  input.addEventListener('input', () => { render(); if (onType) onType(input.value.trim()); });
+  input.addEventListener('blur', () => setTimeout(() => { drop.hidden = true; }, 150));
+}
+
 /* ----- Order edit (customer, address, items, discount) ----- */
 async function openOrderEdit(o) {
   const [products, customers] = await Promise.all([DB.getAll('products'), DB.getAll('customers')]);
@@ -1556,8 +1620,9 @@ async function openOrderEdit(o) {
   openSheet(`
     <h2>Edit ${orderNo(o)}</h2>
     <div class="form-card">
-      <label class="field"><span>Customer</span>
-        <select id="oeCustomer">${customers.map(c => `<option value="${c.id}" ${c.id === o.customerId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <label class="field" style="position:relative"><span>Customer</span>
+        <input id="oeCustomerSearch" value="${esc(o.customerName)}" placeholder="Search customers" autocomplete="off">
+        <div class="combo-drop" id="oeCustomerDrop" hidden></div>
       </label>
       <label class="field"><span>Delivery address</span><input id="oeAddress" value="${esc(o.address)}"></label>
       <h2 class="section-label" style="margin:8px 0 0">Items</h2>
@@ -1623,16 +1688,25 @@ async function openOrderEdit(o) {
 
   $('#oeAddLine').onclick = () => { lines.push(newLine()); drawLines(); };
   $('#oeDiscount').addEventListener('input', updateTotal);
-  $('#oeCustomer').onchange = e => {
-    const c = customers.find(c => c.id === Number(e.target.value));
-    if (c && c.address) $('#oeAddress').value = c.address;
-  };
+  let ePicked = customers.find(c => c.id === o.customerId) || null;
+  attachCustomerPicker({
+    input: $('#oeCustomerSearch'),
+    drop: $('#oeCustomerDrop'),
+    customers, allowNew: false,
+    onPick: c => {
+      ePicked = c;
+      if (c.address) $('#oeAddress').value = c.address;
+    }
+  });
+  // If they typed but didn't pick anyone, snap back to the last valid choice.
+  $('#oeCustomerSearch').addEventListener('blur', () => setTimeout(() => {
+    $('#oeCustomerSearch').value = ePicked ? ePicked.name : o.customerName;
+  }, 160));
   drawLines();
 
   $('#oeSave').onclick = async () => {
-    const customerId = Number($('#oeCustomer').value);
-    const customer = customers.find(c => c.id === customerId);
-    if (!customer) return snack('Pick a customer');
+    const customerId = ePicked ? ePicked.id : o.customerId;
+    const customer = ePicked || { id: o.customerId, name: o.customerName };
     const address = $('#oeAddress').value.trim();
     if (!address) return snack('Enter a delivery address');
 
@@ -1776,13 +1850,13 @@ async function openOrderForm() {
 
   const productOptions = sel => products.map(p =>
     `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} (${p.trackStock === false ? MODE_TAGS[stockMode(p)] : fmtStock(p) + ' left'})</option>`).join('');
-  const customerOptions = customers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
 
   openSheet(`
     <h2>New order</h2>
     <div class="form-card">
-      <label class="field"><span>Customer</span>
-        <select id="ofCustomer"><option value="">＋ New customer</option>${customerOptions}</select>
+      <label class="field" style="position:relative"><span>Customer</span>
+        <input id="ofCustomerSearch" placeholder="Search customers, or type a new name" autocomplete="off">
+        <div class="combo-drop" id="ofCustomerDrop" hidden></div>
       </label>
       <div id="ofNewCustomer">
         <div class="field-row">
@@ -1866,23 +1940,31 @@ async function openOrderForm() {
   // Prefill order date & time with now (local time)
   $('#ofDate').value = tsToDateInput(Date.now());
   $('#ofTime').value = tsToTimeInput(Date.now());
-  $('#ofCustomer').onchange = async e => {
-    const id = Number(e.target.value);
-    $('#ofNewCustomer').hidden = !!id;
-    if (id) {
-      const c = customers.find(c => c.id === id);
+  let pickedCustomer = null; // null = creating a new customer
+  attachCustomerPicker({
+    input: $('#ofCustomerSearch'),
+    drop: $('#ofCustomerDrop'),
+    customers, allowNew: true,
+    onPick: c => {
+      pickedCustomer = c;
+      $('#ofNewCustomer').hidden = true;
       $('#ofAddress').value = c.address || '';
-    } else $('#ofAddress').value = '';
-  };
+    },
+    onType: name => {
+      pickedCustomer = null;
+      $('#ofNewCustomer').hidden = false;
+      $('#ofName').value = name; // typed name doubles as the new customer's name
+    }
+  });
 
   $('#ofCreate').onclick = async () => {
-    let customerId = Number($('#ofCustomer').value) || null;
+    let customerId = pickedCustomer ? pickedCustomer.id : null;
     let customerName;
     const address = $('#ofAddress').value.trim();
     if (!address) return snack('Enter a delivery address');
 
     if (customerId) {
-      customerName = customers.find(c => c.id === customerId).name;
+      customerName = pickedCustomer.name;
     } else {
       customerName = $('#ofName').value.trim();
       const phone = $('#ofPhone').value.trim();

@@ -1,6 +1,6 @@
 /* Service worker — caches the entire app shell so BuddyBoard
    runs with zero network. Bump CACHE version when files change. */
-const CACHE = 'buddyboard2-v7';
+const CACHE = 'buddyboard2-v9';
 const SHELL = [
   './',
   './index.html',
