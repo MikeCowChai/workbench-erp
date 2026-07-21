@@ -344,13 +344,14 @@ function closeSheet() {
   $('#scrim').hidden = true;
 }
 $('#scrim').addEventListener('click', closeSheet);
-$('#sheetClose').addEventListener('click', closeSheet);
+{ const b = $('#sheetClose'); if (b) b.addEventListener('click', closeSheet); }
 
 /* The handle strip is a guaranteed dismiss zone: dragging it down always
    closes the sheet, regardless of where the content is scrolled. */
 (function enableHandleDrag() {
   const sheet = $('#sheet');
   const handle = $('#sheetHandle');
+  if (!sheet || !handle) return; // older index.html — degrade gracefully
   let startY = 0, dy = 0, active = false;
   handle.addEventListener('touchstart', e => {
     active = true; dy = 0;
