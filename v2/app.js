@@ -1,3 +1,23 @@
+/* ---- Build stamp + crash visibility ----------------------------------
+   If ANYTHING crashes, a red banner shows the actual error message on
+   screen instead of the app silently dying. The build number makes it
+   possible to verify which version a device is actually running. */
+const BUILD = 'v12';
+function showFatal(msg) {
+  try {
+    let b = document.getElementById('errBanner');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'errBanner';
+      b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#B3261E;color:#fff;font:12.5px/1.45 system-ui;padding:10px 14px;white-space:pre-wrap;word-break:break-word';
+      (document.body || document.documentElement).appendChild(b);
+    }
+    b.textContent = 'App error — screenshot this and send it: ' + msg + '  [build ' + BUILD + ']';
+  } catch (e) { /* never let the reporter itself crash */ }
+}
+window.addEventListener('error', e => showFatal((e.message || 'unknown error') + (e.filename ? ' @ ' + e.filename.split('/').pop() + ':' + e.lineno : '')));
+window.addEventListener('unhandledrejection', e => showFatal(String((e.reason && (e.reason.stack || e.reason.message)) || e.reason).split('\n').slice(0, 3).join(' | ')));
+
 /* ============================================================
    app.js — BuddyBoard
    Views: Dashboard · Inventory (Stock / Incoming purchases)
@@ -193,7 +213,7 @@ function openSettings() {
         <span class="set-chevron">›</span>
       </button>
     </div>
-    <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant);margin-top:10px;padding:0 4px">Your data lives only on this device — export a backup regularly and keep it somewhere safe.</div>`);
+    <div class="sub" style="font-size:12.5px;color:var(--md-on-surface-variant);margin-top:10px;padding:0 4px">Your data lives only on this device — export a backup regularly and keep it somewhere safe.<br><br>BuddyBoard v2 · build ${BUILD}</div>`);
 
   document.querySelectorAll('[data-theme-pick]').forEach(c =>
     c.addEventListener('click', () => {
